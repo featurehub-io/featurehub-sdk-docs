@@ -14,19 +14,22 @@
 # captured as 5,940 matcher cases, 425 strategy scenarios, 400 percentages and
 # 15 hashes in fixtures/typescript_golden.json (next to this file, in
 # featurehub-sdk-docs). Where this text and the fixture disagree, the
-# fixture wins. FeatureHub Edge evaluates server-evaluated keys with its own
+# fixture wins. The one deliberate difference from TypeScript is numbers
+# (js_conversions.strict_number): the fixture records the strict result, and
+# TypeScript's beside it. FeatureHub Edge evaluates server-evaluated keys with its own
 # (Java) implementation; a difference between Edge and the fixture is a bug to
 # report, not something an SDK should copy.
 #
 # Reference port: featurehub-openfeatures-common/lib/src/strategy/
 #   apply_feature.dart (the algorithm), matchers.dart (per type),
-#   murmur3.dart, netmask.dart (IPv4 blocks), js_compat.dart (JS conversions).
+#   murmur3.dart, netmask.dart (IPv4 blocks), js_compat.dart (JS conversions
+#   and strictNumber).
 #
 # MUST / SHOULD / MAY as in RFC 2119.
 
 spec:
   name: featurehub-rollout-strategies
-  version: 1.0.0
+  version: 1.1.0
   status: implemented-in-dart; conforms to the TypeScript SDK via the golden fixture
   related:
     encoding: featurehub-protocol.yaml (rollout_strategy JSON; context mapping)
@@ -136,8 +139,25 @@ algorithm:
 # ---------------------------------------------------------------------------
 js_conversions:
   js_to_string: "a whole-number float prints without a fraction (1.0 -> \"1\"); NaN -> \"NaN\"; infinities -> \"Infinity\" / \"-Infinity\"; booleans -> \"true\" / \"false\""
-  js_parse_int: "leading whitespace, optional sign, then decimal digits; the longest such prefix (\"12abc\" -> 12, \" 3\" -> 3); NaN if there are no digits"
-  js_parse_float: "the longest numeric prefix after leading whitespace (decimal, optional fraction and exponent, or Infinity); NaN if none"
+  strict_number:
+    rule: >-
+      NOT a JavaScript conversion: NUMBER attributes MUST NOT use parseInt,
+      parseFloat or Number(). A number is a finite number value (JSON
+      number, or a native int or float in the context), or a string that is
+      exactly a decimal integer or float: an optional + or -, one or more
+      digits 0-9, and optionally "." followed by one or more digits. The
+      whole string must match, with nothing before or after it, not even
+      whitespace. Anything else is not a number: a string such as "12abc",
+      "1e3", "0x10", ".5", "5.", " 3", "1,000", "Infinity" or "", a boolean,
+      a date, NaN or an infinity.
+    grammar: '^[+-]?[0-9]+(\.[0-9]+)?$'
+    valid: ["0", "12", "-5", "+7", "007", "2.5", "-0.5", "100.0"]
+    invalid: ["12abc", "1e3", "0x10", ".5", "-.5", "5.", " 3", "3 ", "1,000", "Infinity", "NaN", ""]
+    why: >-
+      TypeScript's parseInt / parseFloat read the longest numeric prefix
+      ("12abc" is 12, "0x10" is 0) and accept exponents ("1e3" is 1000).
+      Every SDK would have to copy those rules exactly, and they hide
+      mistakes in the context or the strategy instead of rejecting them.
   js_number: "the whole trimmed string must be numeric (also 0x, 0b, 0o prefixes); empty -> 0; otherwise NaN"
   nan: "every comparison with NaN is false (so NOT_EQUALS against a NaN supplied value is true)"
   string_compare: "plain string ordering by UTF-16 code unit (\"A\" < \"a\")"
@@ -163,13 +183,13 @@ matchers:
 
   NUMBER:
     prepare:
-      supplied: "a number as is; a string: js_parse_float if it contains \".\", else js_parse_int"
-      values: "numbers as is; others js_parse_float(js_to_string(v))"
+      supplied: "strict_number. If it is not a number the attribute does not match, whatever the conditional (NOT_EQUALS and EXCLUDES included)"
+      values: "strict_number each; values that are not numbers are ignored, as null values are (so NOT_EQUALS and EXCLUDES with no number values are true)"
     EQUALS: any value == supplied
     NOT_EQUALS: no value == supplied
     GREATER / GREATER_EQUALS / LESS / LESS_EQUALS: supplied compares so against any value (numerically)
     INCLUDES / EXCLUDES / STARTS_WITH / ENDS_WITH / REGEX: >-
-      as STRING, but on js_to_string(the parsed supplied number) against the
+      as STRING, but on js_to_string(the supplied number) against the number
       values stringified (so "100.0" is "100", which STARTS_WITH 1)
 
   SEMANTIC_VERSION:
@@ -225,9 +245,11 @@ matchers:
     - {type: STRING, conditional: NOT_EQUALS, values: [], supplied: a, result: true}
     - {type: STRING, conditional: EXCLUDES, values: [], supplied: a, result: true}
     - {type: NUMBER, conditional: EQUALS, values: [1, 2], supplied: "1.0", result: true}
-    - {type: NUMBER, conditional: GREATER, values: [10], supplied: "12abc", result: true, shows: "parseInt prefix"}
+    - {type: NUMBER, conditional: GREATER, values: [10], supplied: "12abc", result: false, shows: "not a number (TypeScript: true, parseInt prefix)"}
+    - {type: NUMBER, conditional: EQUALS, values: [1000], supplied: "1e3", result: false, shows: "no exponents (TypeScript: true)"}
+    - {type: NUMBER, conditional: EQUALS, values: ["1e3"], supplied: 1000, result: false, shows: "a value that is not a number is ignored (TypeScript: true)"}
     - {type: NUMBER, conditional: STARTS_WITH, values: [1, 2], supplied: "100.0", result: true, shows: "string ops on the parsed number"}
-    - {type: NUMBER, conditional: NOT_EQUALS, values: [1, 2], supplied: abc, result: true, shows: "NaN"}
+    - {type: NUMBER, conditional: NOT_EQUALS, values: [1, 2], supplied: abc, result: false, shows: "not a number never matches (TypeScript: true, NaN)"}
     - {type: SEMANTIC_VERSION, conditional: EQUALS, values: ["1.2"], supplied: "1.2", result: true}
     - {type: SEMANTIC_VERSION, conditional: EQUALS, values: ["1.2.3"], supplied: "1.2.3-beta", result: false}
     - {type: SEMANTIC_VERSION, conditional: NOT_EQUALS, values: ["1.10.0", "1.2.0"], supplied: "1.10.0", result: true, shows: "ANY unequal"}
@@ -266,6 +288,12 @@ golden_fixture:
       count: 5940
       case: {type: field type, conditional: conditional, values: list, supplied: "string | number | boolean", result: "bool, or \"throw\""}
       check: "the matcher for `type`, with an attribute {conditional, type, values, fieldName: \"f\"}, applied to `supplied`, gives `result`; a result of \"throw\" (TypeScript threw: an invalid regex, an invalid or IPv6 address or block) means the implementation MUST NOT match"
+      typescript: >-
+        170 NUMBER cases also have a `typescript` field: TypeScript's result,
+        where it differs from `result` because of js_conversions.strict_number
+        (TypeScript parses "12abc", "1e3", "0x10", "-.5", " 3", "1,000",
+        "Infinity" and "abc" leniently). `result` is the one to check;
+        `typescript` is only a record and MUST NOT be reproduced.
       coverage: "all 7 field types x all 11 conditionals (77 combinations)"
     apply:
       count: 425
@@ -280,7 +308,9 @@ golden_fixture:
     bundle with esbuild (NODE_PATH=<packages/core>/node_modules esbuild
     generate.ts --bundle --platform=node --format=esm --outfile=generate.mjs),
     then run TZ=UTC node generate.mjs typescript_golden.json. Cases are only
-    ever appended, so regenerating keeps every earlier case in place.
+    ever appended, so regenerating keeps every earlier case in place. The
+    generator applies strict_number itself, recording TypeScript's result as
+    `typescript` where it differs.
   reference_runner: featurehub-openfeatures-common/test/strategy/typescript_golden_test.dart
   known_typescript_bugs:   # fixture results implementations MUST NOT reproduce
     - scenario: "empty strategy first"
@@ -290,6 +320,13 @@ golden_fixture:
         NaN, so no later percentage strategy matches (even a 100% one).
       correct: "the empty strategy is skipped (it never matches) and the share is unchanged: the 100% strategy matches anyone with a percentage key"
       runner: the reference runner skips this scenario
+    - scenario: "NUMBER parsing (matchers with a `typescript` field)"
+      typescript: >-
+        parseInt / parseFloat: a numeric prefix is enough ("12abc" is 12),
+        exponents, hex and Infinity are numbers, and a value that is not a
+        number (NaN) makes NOT_EQUALS and EXCLUDES true.
+      correct: js_conversions.strict_number; the fixture's `result` already has it
+      runner: the reference runner checks `result` as for every other case
   gaps:   # behaviour the fixture does NOT exercise; test these yourself
     - "date-times without an offset (local time): the fixture is generated with TZ=UTC"
     - "native date-time values in the context (JSON has none; they are normalised to UTC like strings)"
