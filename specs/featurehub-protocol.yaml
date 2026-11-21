@@ -261,14 +261,26 @@ polling_transport:
 # 3. The repository side (what notify must do)
 # ---------------------------------------------------------------------------
 repository:
-  readiness: {initial: NotReady, values: [NotReady, Ready, Failed]}
+  readiness:
+    initial: NotReady
+    values: [NotReady, Ready, Stale, Failed]
+    transitions:
+      - "NotReady -> Ready: a full set of features"
+      - "NotReady -> Failed: failure before any features"
+      - "Ready -> Stale: a permanent stop after features (failure, or markEnvironmentStale)"
+    stale: >-
+      Stale can only be entered from Ready: NotReady never goes straight to
+      Stale (a failure before features is Failed). Stale is final, and the
+      features held are kept and keep being resolved. A later notification
+      still applies its features, but readiness stays Stale and is not
+      broadcast again.
   notifications:
     features:
       payload: list of feature_state (objects or JSON)
       semantics:
         - apply each feature with the update rule below
         - remove every held feature whose key is not in the set (keys only asked for by code, with no feature, are kept)
-        - readiness becomes Ready and is broadcast (every time, so waiters for "the next ready" wake up)
+        - readiness becomes Ready and is broadcast (every time, so waiters for "the next ready" wake up), unless it is Stale, which stays Stale
         - recompute the SHA
     feature:
       payload: one feature_state
@@ -277,18 +289,19 @@ repository:
       payload: one feature_state (only key/id needed)
       semantics: remove it (and, where catch-and-release is supported, any update for it held back); recompute the SHA
     bye:
-      semantics: "readiness MUST NOT change, and nothing is broadcast: the connection is being re-established, and the features held are still the latest known (Ready stays Ready; before any features it stays NotReady). Providers report nothing and do NOT report stale; the features arrive again on reconnection, as a full set"
+      semantics: "readiness MUST NOT change, and nothing is broadcast: the connection is being re-established, and the features held are still the latest known (Ready stays Ready, Stale stays Stale; before any features it stays NotReady). Providers report nothing and do NOT report stale; the features arrive again on reconnection, as a full set"
     failure:
-      semantics: "readiness Failed. Before any features: the provider's initialisation fails (PROVIDER_FATAL). After features: a permanent stop, so the provider reports STALE for good and keeps resolving from the last features"
+      semantics: "Before any features: readiness Failed, and the provider's initialisation fails (PROVIDER_FATAL). After features (Ready): readiness Stale, a permanent stop, so the provider reports STALE for good and keeps resolving from the last features. Already Stale: nothing changes"
   environment_stale:
     call: markEnvironmentStale() (not a notify state)
     semantics: >-
       The source says the environment is stale and will send no further
       updates (FeatureHub Edge's 236 when polling, or edge.stale when
       streaming),
-      after the last features. Sets environmentStale = true, once; readiness
-      is unchanged (it stays Ready), so initialisation is not delayed and
-      resolutions continue from the last features. Providers report STALE,
+      after the last features. Sets environmentStale = true, once, and
+      readiness goes from Ready to Stale (if it is not Ready, readiness is
+      unchanged); initialisation has already finished, and resolutions
+      continue from the last features. Providers report STALE,
       permanently. It is a separate signal from bye because a bye means the
       source will send more (it is reconnecting), and a stale environment
       means it never will.
@@ -353,8 +366,11 @@ transport:
       Everything else is temporary and retried: a 5xx, a network error or
       timeout, and (when streaming) an invalid 1xx or 3xx response. A stale
       environment (236, edge.stale) is not a failure either: the provider
-      reports STALE but readiness stays Ready (repository.environment_stale).
+      reports STALE and readiness goes from Ready to Stale (repository.environment_stale).
   helpers:
+    requirement: >-
+      OPTIONAL. An SDK that implements feature-snapshot-protocol.yaml MUST
+      provide both; an SDK that does not MAY omit them.
     loadFeatureSnapshot: >-
       repository.loadFeatureSnapshot(data): loads a feature_snapshot, its JSON
       (a map or a string) or a bare array of features as a full set (the same
@@ -437,7 +453,7 @@ providers:
     - {on: "not ready within waitForReady", event: "ERROR (GENERAL): '<source> did not become ready within <waitForReady>'"}
     - {on: "Failed before any features (during initialisation)", event: "ERROR (PROVIDER_FATAL); initialisation fails"}
     - {on: "bye (a lost connection being re-established)", event: "none: the provider stays ready"}
-    - on: "a permanent stop after features: Failed (a rejection, a browser connection error), or the FeatureHub environment going stale (polling 236, streaming edge.stale)"
+    - on: "readiness Stale: a permanent stop after features, either a failure (a rejection, a browser connection error) or the FeatureHub environment going stale (polling 236, streaming edge.stale)"
       event: >-
         STALE, after READY (even if the stop came with the first response),
         once; never followed by READY or ERROR. Resolutions continue from the
@@ -494,7 +510,7 @@ featurehub_edge:
         action: >-
           load the features as for 200, then stop polling for good and
           markEnvironmentStale(). Not a failure and not a lost connection:
-          readiness stays Ready and the provider reports STALE, permanently.
+          readiness goes from Ready to Stale and the provider reports STALE, permanently.
       - {status: "4xx", action: "the key is rejected: notify(failure), stop polling. Every 4xx, 429 included (unlike the snapshot client, which retries 429)"}
       - {status: "other, or a network error / timeout", action: "an error; the next poll retries"}
     cache_control:
@@ -538,7 +554,7 @@ featurehub_edge:
       - >-
         config {"edge.stale": true}: arrives after the features have been
         delivered; markEnvironmentStale(), close the stream, and do not
-        reconnect or send bye. Readiness stays Ready; the provider reports
+        reconnect or send bye. Readiness goes from Ready to Stale; the provider reports
         STALE, permanently.
     connection_errors:
       description: >-
@@ -662,9 +678,9 @@ conformance:
   - id: edge-polling-rejection
     check: "polling FeatureHub: any 4xx fails the repository and stops polling; a 5xx keeps polling"
   - id: edge-stale
-    check: "a 236 (polling) or edge.stale (streaming) after features: the repository stays Ready, environmentStale is true, nothing more is requested, the provider reports STALE once"
+    check: "a 236 (polling) or edge.stale (streaming) after features: the repository's readiness is Stale, environmentStale is true, nothing more is requested, the provider reports STALE once"
   - id: bye-not-stale
-    check: "a bye leaves the repository's readiness unchanged (Ready stays Ready, nothing is broadcast), and the provider reports no event"
+    check: "a bye leaves the repository's readiness unchanged (Ready stays Ready, Stale stays Stale, nothing is broadcast), and the provider reports no event"
   - id: streaming-statuses
     check: "the default reconnect policy retries 1xx, 3xx and 5xx, and not any 4xx (429 included)"
   - id: streaming-not-an-event-stream
@@ -676,7 +692,9 @@ conformance:
   - id: streaming-stops-for-good
     check: "the event source stopping for good (a 4xx, an unretried status, no attempts left) notifies failure, never bye"
   - id: permanent-failure
-    check: "a permanent failure before features fails initialisation (PROVIDER_FATAL); after them the provider reports STALE once and keeps resolving"
+    check: "a permanent failure before features sets readiness Failed and fails initialisation (PROVIDER_FATAL); after them readiness goes from Ready to Stale, the provider reports STALE once and keeps resolving"
+  - id: stale-only-after-ready
+    check: "readiness never goes from NotReady to Stale (a failure before features is Failed, markEnvironmentStale before features leaves it NotReady); once Stale, a full set of features is applied but readiness stays Stale and nothing is broadcast"
   - id: nullable-strategy-fields
     check: "strategies whose attributes, percentageAttributes or values are null or absent decode, and evaluate as empty lists"
   - id: connection-default-mode
