@@ -73,12 +73,20 @@ encoding:
             text (not a nested object).
         v: {type: [string, "null"], description: "Id of the rollout strategy that supplied `value` (server-evaluated or snapshot-evaluated features); null/absent if the default value applies."}
         fp: {type: object, additionalProperties: {type: string}, description: "Feature properties (string to string). Optional."}
-        environmentId: {type: string, description: "Optional."}
+        environmentId: {type: string, description: "Optional. Never sent by FeatureHub Edge, as the environment wrapping the features carries its id (featurehub_edge.polling.edge_api); an SDK MAY fill it in from that wrapper."}
         strategies:
           type: [array, "null"]
           description: "Rollout strategies, in evaluation order. Present only when the receiver is to evaluate locally (client-evaluated keys, or a raw snapshot); absent, null and empty all mean none."
           items: {$ref: "featurehub/rollout-strategy"}
       additionalProperties: true
+    required_fields: >-
+      id, key, version and type are required. The Edge OpenAPI definition
+      (featurehub_edge.polling.edge_api) marks only id and key as required,
+      but FeatureHub Edge always sends version and type, and this protocol
+      relies on them (the update rule compares versions; a value is resolved
+      by its type). A decoder MUST skip a feature without a version or a
+      type, as an invalid feature: it is not applied, and in a full set its
+      key counts as not in the set.
     encoding_rules:
       - Encoders SHOULD omit `value`, `v`, `fp`, `environmentId` and `strategies` when null (the Dart encoder does).
       - Encoders MUST always write `id`, `key`, `l`, `version`, `type`.
@@ -168,7 +176,7 @@ encoding:
       - >-
         the well-known keys are exactly the StrategyAttributeWellKnownNames
         schema of the FeatureHub Edge OpenAPI definition
-        (http://api.dev.featurehub.io/edge/1.1.8.yaml, from which
+        (currently http://api.dev.featurehub.io/edge/1.1.9.yaml, from which
         featurehub_client_api is generated; currently device, country, platform, userkey,
         session, version). They are recognised case-insensitively and
         written lowercase; userkey is handled by the rule above. Nothing else
@@ -192,9 +200,21 @@ encoding:
         query parameter for browser SSE). Not used by the snapshot client, but
         exposed to custom transports as FeatureHubTransportTarget.contextHeader.
       format: >-
-        for each attribute: "<key>=" + query-component-encode(values joined by ",");
-        sort these strings; join with ","; no attributes -> no header.
+        for each attribute: query-component-encode(key) + "=" +
+        query-component-encode(values joined by ","); sort these encoded
+        strings (plain string comparison); join with ","; no attributes -> no
+        header. An attribute whose values are all null, or that has no
+        values, is left out.
+      query_component_encode: >-
+        Everything is encoded, keys as well as values, as JavaScript's
+        encodeURIComponent does: UTF-8, then every byte except A-Z a-z 0-9
+        - _ . ! ~ * ' ( ) as %XX (uppercase hex). So a "," or "=" in a key or
+        a value can never be confused with the separators.
       example: "country=nz,userkey=fred"
+      examples:
+        - {attributes: {userkey: [fred], country: [nz]}, header: "country=nz,userkey=fred"}
+        - {attributes: {shop: ["a&b", "c d"]}, header: "shop=a%26b%2Cc%20d"}
+        - {attributes: {"my key": [x], "a,b=c": [y]}, header: "a%2Cb%3Dc=y,my%20key=x"}
 
 # ---------------------------------------------------------------------------
 # 2. Polling / passive scheduling (shared by FeatureHub polling and snapshots)
@@ -254,7 +274,12 @@ polling_transport:
       synchronous). Makes an unforced request.
     failure_backoff: after a failed request, no unforced request until now + interval
     zero_interval: "refreshIfStale does nothing after the first request (interval.zero_polls_once)"
-  context_changed: a forced request (fetches for the new context immediately)
+  context_changed: >-
+    a forced request (fetches for the new context immediately). On a
+    transport that has been closed it makes that one request, so the new
+    context's features arrive, and stays closed: it does not start polling
+    again. Once the environment is stale (236) it makes no request at all
+    (providers.context_change).
   errors: logged; the next poll or refresh retries
 
 # ---------------------------------------------------------------------------
@@ -277,6 +302,14 @@ repository:
   notifications:
     features:
       payload: list of feature_state (objects or JSON)
+      invalid_payload: >-
+        A payload that is not a list (a string, an object, a number) is not a
+        full set: it MUST be ignored (logged), changing nothing - no feature
+        is applied or removed and readiness does not change. Otherwise
+        removing every feature not in the "set" would empty the repository
+        and still make it Ready. Individual entries that are not valid
+        features (no key, no version) are skipped, and their keys count as
+        not in the set.
       semantics:
         - apply each feature with the update rule below
         - remove every held feature whose key is not in the set (keys only asked for by code, with no feature, are kept)
@@ -292,6 +325,14 @@ repository:
       semantics: "readiness MUST NOT change, and nothing is broadcast: the connection is being re-established, and the features held are still the latest known (Ready stays Ready, Stale stays Stale; before any features it stays NotReady). Providers report nothing and do NOT report stale; the features arrive again on reconnection, as a full set"
     failure:
       semantics: "Before any features: readiness Failed, and the provider's initialisation fails (PROVIDER_FATAL). After features (Ready): readiness Stale, a permanent stop, so the provider reports STALE for good and keeps resolving from the last features. Already Stale: nothing changes"
+      before_any_features: >-
+        "Before any features" means no full set of features has ever been
+        received, not "readiness is not Ready". An SDK that sets readiness back
+        to NotReady while it fetches for a new context (so callers can wait for
+        the new context's features) still holds the old features: a failure
+        then (for example a 4xx in reply to the context change's request) MUST
+        make readiness Stale, not Failed, and the old features keep being
+        resolved.
   environment_stale:
     call: markEnvironmentStale() (not a notify state)
     semantics: >-
@@ -501,12 +542,99 @@ featurehub_edge:
       FeatureHubRestClient (polling) and the SSE listener (streaming); custom
       transports get them as FeatureHubTransportTarget.headers.
   polling:
+    edge_api:
+      description: >-
+        The polling request is the getFeatureStates operation of the
+        FeatureHub Edge OpenAPI definition, version 1.1.9
+        (http://api.dev.featurehub.io/edge/1.1.9.yaml; in the FeatureHub
+        repository, infra/api-bucket/files/edge/1.1.9.yaml). The extract below
+        is that operation and the schema of its response, trimmed to what the
+        SDKs use; FeatureState and FeatureRolloutStrategy are
+        encoding.feature_state and encoding.rollout_strategy. Edge's SSE
+        stream is not part of that definition (featurehub_edge.streaming).
+      operation:
+        method: GET
+        path: /features/
+        operationId: getFeatureStates
+        parameters:
+          - name: apiKey
+            in: query
+            required: true
+            schema: {type: array, items: {type: string}}
+            style: form
+            explode: true
+            description: >-
+              The API keys to fetch: one apiKey parameter per key
+              (?apiKey=k1&apiKey=k2). See several_api_keys.
+          - name: contextSha
+            in: query
+            required: false
+            schema: {type: string}
+            description: >-
+              Not used by Edge. It breaks caches in front of Edge when the
+              client's context changes, and MUST be present if Edge runs with
+              Fastly support. The SDKs always send it (request).
+        responses:
+          "200":
+            description: all the environments the keys have permission to, or that were found
+            headers: {x-fh-version: {required: false, schema: {type: string}}}
+            content: {application/json: {schema: {type: array, items: {$ref: "#/FeatureEnvironmentCollection"}}}}
+          "236":
+            description: the environment is stale ("its not you, its me, environment stagnant"); the body is as for 200
+            headers: {x-fh-version: {required: false, schema: {type: string}}}
+            content: {application/json: {schema: {type: array, items: {$ref: "#/FeatureEnvironmentCollection"}}}}
+          "400":
+            description: no environments were asked for (no apiKey)
+            headers: {x-fh-version: {required: false, schema: {type: string}}}
+      schemas:
+        FeatureEnvironmentCollection:
+          type: object
+          required: [id]
+          properties:
+            id: {type: string, format: uuid, description: "the environment's id"}
+            features: {type: array, items: {$ref: "featurehub/feature-state"}, description: "absent means none"}
+          description: >-
+            One environment's features. A GET can ask for several API keys
+            at once, so the response is an array of these, one per
+            environment.
+      not_in_the_definition: >-
+        The definition documents only the operation itself. The rest of the
+        contract the SDKs rely on is specified here: the x-featurehub request
+        header (request) and the extra headers (extra_headers); If-None-Match,
+        ETag and 304 (etag); Cache-Control (cache_control); and the statuses
+        it does not list - 304, every other 4xx and the 5xx (responses).
+      differences:
+        - "FeatureState: the definition requires only id and key; this protocol also requires version and type (encoding.feature_state.required_fields)"
+        - "FeatureState.environmentId: never sent by Edge (the FeatureEnvironmentCollection carries the id); an SDK MAY fill it in from the collection"
+        - "rollout strategies: the definition has values not nullable and attributes and percentageAttributes defaulting to []; decoders still accept null and absence for all of them (encoding.rollout_strategy.decoding_rules), which is more lenient and covers other encoders"
+        - "FeatureEnvironmentCollection.features: the definition does not make it nullable; decoders accept null as none (body)"
     request: >-
-      GET <host>/features?apiKey=<key>&contextSha=<sha256 of the
-      x-featurehub header, or 0>; with the x-featurehub header for a
-      server-evaluated key, and the extra headers (extra_headers).
+      GET <host>/features?apiKey=<key>[&apiKey=<key>...]&contextSha=<sha256
+      of the x-featurehub header, or 0>; with the x-featurehub header for a
+      server-evaluated key, and the extra headers (extra_headers). This is
+      edge_api's getFeatureStates.
+    several_api_keys: >-
+      An SDK MAY accept several API keys, sent as repeated apiKey
+      parameters; the response then has one environment per key. The
+      features of all the environments in a response together are one full
+      set, and MUST be given to the repository as one notify(features).
+      Notifying each environment's features in turn is wrong: each full set
+      removes the features not in it, so every environment would remove the
+      ones before it.
+    body: >-
+      A 200 or 236 body from FeatureHub is always a JSON array of
+      environments (edge_api FeatureEnvironmentCollection), each a JSON object
+      with a `features` array (absent or null means none):
+      [{"id": "e1", "features": [...]}, ...]. Anything else
+      can only come from something between the SDK and Edge (a proxy or
+      gateway) or a fault, and is an error, as for a network error: a top
+      level that is not an array, an entry that is not an environment object,
+      or a `features` that is not an array. It is
+      logged, nothing is notified, the repository is unchanged, and the next
+      poll retries. A null entry in the array is skipped.
     responses:
-      - {status: 200, action: "load the features (an array of environments, each with its features): a full set"}
+      - {status: 200, action: "load the features (an array of environments, each with its features): a full set, the features of every environment together (several_api_keys)"}
+      - {status: 304, action: "only in reply to If-None-Match (etag): nothing has changed; not an error, nothing is notified, and the ETag is kept and sent again with the next request"}
       - status: 236
         action: >-
           load the features as for 200, then stop polling for good and
@@ -514,6 +642,20 @@ featurehub_edge:
           readiness goes from Ready to Stale and the provider reports STALE, permanently.
       - {status: "4xx", action: "the key is rejected: notify(failure), stop polling. Every 4xx, 429 included (unlike the snapshot client, which retries 429)"}
       - {status: "other, or a network error / timeout", action: "an error; the next poll retries"}
+    etag:
+      rule: >-
+        An SDK MAY send If-None-Match with the ETag it holds. It gets an ETag
+        from a 200 or 236 response whose body it applied (not one whose body
+        failed, or the server would answer 304 for good). A 304 means nothing
+        has changed, so the ETag it was answering is still current: it MUST be
+        kept and sent again with every later request, for as long as the
+        server keeps answering 304 (it is not cleared by a 304, nor by an
+        error such as a 5xx or a network failure). The ETag belongs to the context it
+        was fetched for: a context change MUST clear it, and an ETag from a
+        response to a request made for a context that has since changed MUST
+        NOT be kept. Otherwise a 304 for the old context's ETag would leave
+        the repository with the old context's features (and, after a
+        context change, waiting for a readiness that never comes).
     cache_control:
       rule: >-
         If a 200 or 236 response has a Cache-Control header containing
@@ -706,6 +848,27 @@ conformance:
     check: "a poll interval of 4s (or 1ms) is a validation error, for FeatureHub and snapshot polling; 5s and 0 are valid; a max-age=1 response sets the interval to 5s"
   - id: edge-polling-rejection
     check: "polling FeatureHub: any 4xx fails the repository and stops polling; a 5xx keeps polling"
+  - id: edge-polling-several-environments
+    check: "a response with two environments (two API keys), each with its own features, leaves the repository holding the features of both, from one notify(features)"
+  - id: edge-polling-invalid-body
+    check: >-
+      a 200 whose body is not the array of environments that FeatureHub
+      sends (polling.body) - for example a single environment that is not
+      wrapped in an array ({"id": "e1", "features": []}), an array holding
+      something other than environments (["e1"]), or an environment whose
+      features is not an array ([{"id": "e1", "features": {"key": "f1"}}]) -
+      notifies nothing and leaves the repository unchanged; the next poll
+      retries
+  - id: edge-polling-etag-per-context
+    check: "after a 304 the next request sends the same If-None-Match; after a context change the next request sends no If-None-Match; an ETag returned for a request whose context changed while it was in flight is not kept"
+  - id: polling-context-change-after-close
+    check: "a context change on a closed polling transport makes exactly one request, applies its features, and does not start polling again"
+  - id: features-invalid-payload
+    check: "notify(features) with a string, an object or a number changes nothing: no feature is removed and readiness is unchanged"
+  - id: failure-after-context-change
+    check: "features received, readiness reset for a context change, then a failure: readiness is Stale (not Failed) and the old features still resolve"
+  - id: x-featurehub-encoding
+    check: "encoding.evaluation_context.x_featurehub_header.examples all reproduce: keys and values are both encoded, then the encoded strings sorted"
   - id: edge-stale
     check: "a 236 (polling) or edge.stale (streaming) after features: the repository's readiness is Stale, environmentStale is true, nothing more is requested, the provider reports STALE once. Any edge.stale value counts, false and null included"
   - id: bye-not-stale
