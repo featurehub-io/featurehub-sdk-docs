@@ -1,0 +1,347 @@
+# The feature snapshot protocol: a machine-readable specification.
+#
+# How your own server re-serves the features it gets from FeatureHub to its
+# own clients, and how those clients fetch them. It is not FeatureHub's
+# protocol: neither side talks to FeatureHub Edge here. Describes, precisely
+# enough to reimplement in another language:
+#   1. the encoding (FeatureSnapshot and its ETag);
+#   2. the snapshot server, and the function an SDK gives the server's code;
+#   3. the snapshot client (polling / passive refresh with If-None-Match).
+#
+# Built on featurehub-protocol.yaml, which it does not repeat: the FeatureState JSON
+# (encoding.feature_state), the SHA (encoding.sha), the evaluation context
+# (encoding.evaluation_context), polling and passive scheduling
+# (polling_transport, shared with FeatureHub polling), what the repository
+# does with each notification (repository), the transport contract
+# (transport) and how providers choose a transport (providers). A reference
+# to one of those sections names that file.
+#
+# Paths to code, tests and fixtures are in the Dart SDK repository,
+# https://github.com/featurehub-io/featurehub-flutter-sdk, unless another
+# repository is named.
+#
+# Reference implementation: the Dart SDK,
+#   featurehub-openfeatures-common (lib/src/feature_snapshot.dart,
+#   lib/src/transport/snapshot_transport.dart,
+#   ClientFeatureRepository.featureSnapshot in lib/src/repository.dart), and
+#   the server example featurehub-openfeatures-server-sdk/example/main.dart
+#   (GET /features).
+#
+# Conventions: MUST / SHOULD / MAY as in RFC 2119. "repository" is the local
+# in-memory store of features that resolutions read from. Everything marked
+# `reference_behaviour` is what the Dart SDK does; implementations SHOULD match
+# it so clients and servers in different languages interoperate.
+
+spec:
+  name: feature-snapshot-protocol
+  version: 1.0.0
+  status: implemented-in-dart
+  related:
+    featurehub_protocol: >-
+      featurehub-protocol.yaml (FeatureState, the SHA, the evaluation context, polling
+      scheduling, the repository, the transport contract, provider wiring)
+    strategy_evaluation: >-
+      rollout-strategies.yaml (how a snapshot server evaluates the features
+      for a request's context)
+    feature_stores: feature-store.yaml (the Redis store's keys use the same SHA)
+
+# ---------------------------------------------------------------------------
+# 1. Encoding
+# ---------------------------------------------------------------------------
+encoding:
+  media_type: application/json
+  charset: utf-8
+
+  feature_snapshot:
+    description: >-
+      The features a repository holds plus their SHA, as served by a snapshot
+      server and read by a snapshot client.
+    json_schema:
+      $schema: https://json-schema.org/draft/2020-12/schema
+      $id: featurehub/feature-snapshot
+      type: object
+      required: [features]
+      properties:
+        sha: {type: string, pattern: "^[0-9a-f]{64}$", description: "See featurehub-protocol.yaml encoding.sha. Optional on input (computed if absent)."}
+        features: {type: array, items: {$ref: "featurehub/feature-state"}}
+    example:
+      sha: 90efe21f27585227b23a9782d8aabd8b5139cda839df1a0b8b60fe4c6673c9fd
+      features:
+        - {id: f1, key: FEATURE_STRING, l: false, version: 2, type: STRING, value: green, v: nz, environmentId: env}
+        - {id: f2, key: FEATURE_TITLE_TO_UPPERCASE, l: false, version: 1, type: BOOLEAN, value: true, environmentId: env}
+    decoding:
+      description: >-
+        A reader (Dart: FeatureSnapshot.from) MUST accept any of these inputs and
+        fail with a format error otherwise, leaving the repository unchanged:
+      accepted_inputs:
+        - an already-decoded snapshot object
+        - a JSON string (decoded first; invalid JSON is a format error)
+        - an object/map with `features` (an array) and optional `sha`; if `sha` is absent or not a string it is computed from the features
+        - a bare array of features; the sha is computed
+      errors:
+        - "`features` missing or not an array"
+        - "any element is not a decodable feature_state (missing id/key/version/type, or bad type)"
+        - "anything else (number, null, HTML, ...)"
+      version_required: >-
+        `version` is required in every feature of a snapshot: a feature whose
+        version is absent or null is a format error. Decoders MUST NOT default
+        it to 0 (the SHA, the update rule and change events all depend on it).
+
+  etag:
+    format: 'the SHA in double quotes: "<sha>"  (a strong entity tag)'
+    example: '"90efe21f27585227b23a9782d8aabd8b5139cda839df1a0b8b60fe4c6673c9fd"'
+    why_valid_per_url: >-
+      The SHA covers ids and versions only, so different contexts get the same
+      ETag. This is still a correct validator because the context is in the
+      URL (query parameters) and HTTP caches/clients validate per URL, and the
+      evaluated values for a fixed context only change when a feature's
+      version changes (which changes the SHA). If a context were ever carried
+      in a header instead of the URL, the ETag MUST also incorporate the
+      context.
+
+# ---------------------------------------------------------------------------
+# 2. Snapshot server
+# ---------------------------------------------------------------------------
+server:
+  description: >-
+    Your own server, connected to FeatureHub with a client-evaluated API key
+    (see api_key_requirement), re-serving features to its own clients. Reference: GET /features in
+    featurehub-openfeatures-server-sdk/example/main.dart, using
+    ClientFeatureRepository.featureSnapshot (snapshot_api).
+  endpoint:
+    method: GET
+    path: /features   # any path; clients are configured with the full URL
+    request:
+      query_parameters:
+        description: >-
+          The evaluation context. Each distinct name is an attribute; a name
+          given once is a string, a name repeated is a list of strings. All
+          values arrive as strings. `targetingKey` or `userkey` is the user key.
+          Decode both "+" and "%20" as space.
+        example: "/features?userkey=fred&country=nz&tags=a&tags=b"
+        resulting_context: {userkey: fred, country: nz, tags: [a, b]}
+      headers:
+        If-None-Match: optional; see conditional_requests
+        Accept: application/json (clients send it; servers MAY ignore)
+    conditional_requests:
+      etag: 'encoding.etag of the repository SHA at request time'
+      if_none_match_matching:
+        - split the header value on ","
+        - trim each tag
+        - strip a leading "W/" (weak comparison)
+        - it matches if any tag is "*" or equals the current ETag exactly (quotes included)
+      on_match: '304 Not Modified, empty body, headers ETag and Cache-Control: no-cache'
+      check_order: the If-None-Match check MAY happen before evaluating the context (the reference does it first)
+    evaluation:
+      selection: >-
+        A request with query parameters is evaluated for that context
+        (with_context). For a request with none, the server's own code
+        chooses, not the request: the protocol has no parameter or header
+        for it. Either it evaluates as for an empty context (with_context,
+        the context being empty; the default), or it serves the features as
+        delivered, rollout strategies included (without_context). Every SDK
+        MUST offer that choice to the server's code: see snapshot_api.
+      consequences: >-
+        A client that evaluates locally (sendContext false, the server
+        provider's default) sends no query, so it needs a server that serves
+        strategies without a context: from one that evaluates instead, it
+        gets every feature's default value, whatever its own context. A
+        client sending its context whose context is empty also sends no
+        query; it resolves either form to the same values (strategies are
+        evaluated locally, spec.related.strategy_evaluation).
+      with_context:
+        description: >-
+          Used when the request has query parameters, and, unless the server
+          serves strategies without a context, when it has none (an empty
+          context). The result is exactly what FeatureHub Edge would send for
+          a server-evaluated key.
+        per_feature:
+          - "if the feature has no strategies (absent or empty): output a copy as is, keeping its `v`"
+          - "otherwise apply the strategies, in order, to the context (spec.related.strategy_evaluation)"
+          - "output: id, key, l, version, type, fp (copy), environmentId unchanged; value = matched strategy's value, else the feature's value; v = matched strategy's id, else null; strategies omitted"
+      without_context:
+        description: >-
+          Used when the request has no query parameters and the server has
+          chosen to serve strategies without a context. "As delivered": deep
+          copies with strategies, for clients that evaluate locally (e.g. a
+          provider using sendContext=false, the server provider's default).
+          Exposes every strategy and its values: only serve this to trusted
+          clients.
+      value_interceptors: not applied (local overrides stay local)
+      sha: the repository SHA when the snapshot is taken (covers all features, unaffected by the context)
+    stale_environment: >-
+      Not part of this protocol. 236 (a stale environment) is only sent by
+      FeatureHub Edge's polling API (featurehub-protocol.yaml featurehub_edge.polling); a snapshot
+      server is not required to send it. When its own FeatureHub environment
+      goes stale it keeps serving the last features as usual (200 / 304).
+    responses:
+      - status: 200
+        when: features served
+        headers: {Content-Type: application/json, ETag: '"<sha>"', Cache-Control: no-cache}
+        body: encoding.feature_snapshot
+      - status: 304
+        when: If-None-Match matches
+        headers: {ETag: '"<sha>"', Cache-Control: no-cache}
+      - status: 400
+        when: invalid context (featurehub-protocol.yaml encoding.evaluation_context rules)
+        body: text message
+      - status: 503
+        when: the server has no features yet (its own FeatureHub connection is not initialised)
+      - status: "401/403/404 or other 4xx"
+        when: server-specific rejections; clients treat these as permanent (see client.responses)
+    cors:
+      description: Needed when browser clients on another origin call it.
+      requirements:
+        - answer the OPTIONS preflight (If-None-Match and any custom headers are not CORS-safelisted, so browsers preflight)
+        - "Access-Control-Allow-Origin: * (or the origin)"
+        - "Access-Control-Allow-Headers: *, or at least if-none-match plus any custom headers"
+        - "Access-Control-Expose-Headers: ETag (so script can read it)"
+  snapshot_api:
+    description: >-
+      What every SDK that can act as a snapshot server MUST provide to the
+      server's own code, wherever the SDK turns a request's context into a
+      feature_snapshot: a function on the repository (or its equivalent),
+      and, if the SDK ships one, its ready-made HTTP handler. The choice
+      below MUST be offered, with the same default, at whichever of these
+      the server's code calls.
+    dart: "ClientFeatureRepository.featureSnapshot({Map<String, Object?>? context, bool includeStrategies = false}); no built-in handler (the example has its own)"
+    go: >-
+      snapshot.NewHandler(source, snapshot.WithStrategiesWithoutContext()):
+      the choice is a handler option, off by default (evaluate), as these
+      rules require.
+    parameters:
+      context: >-
+        An OpenFeature evaluation context in map form (featurehub-protocol.yaml
+        encoding.evaluation_context),
+        optional. Null and empty mean the same: no context.
+      includeStrategies: >-
+        A boolean, or an equivalent the language favours (an option, an enum
+        such as {evaluate, includeStrategies}, a separate function). It MUST
+        exist, and it MUST be the caller's to set: the SDK MUST NOT decide it
+        from the request.
+    rules:
+      - "with a non-empty context: MUST evaluate for it (server.evaluation.with_context), whatever includeStrategies says"
+      - "with no context and includeStrategies false: MUST evaluate as for an empty context (with_context): no strategies in the output"
+      - "with no context and includeStrategies true: MUST give the features as delivered (server.evaluation.without_context): copies, strategies included"
+      - "the default, when the caller does not say, MUST be false (evaluate): exposing every strategy and its values has to be asked for"
+      - "an invalid context is an error (Dart: InvalidContextException), so the server can answer 400"
+      - "value interceptors are not applied; the sha is the repository SHA, whichever form is given"
+    documentation: >-
+      An SDK MUST document the choice where it documents the snapshot
+      function, including server.evaluation.consequences: a server that
+      leaves the default cannot serve clients that evaluate locally (they
+      send no context, and would get every feature's default value).
+    example_handlers: >-
+      An SDK's example snapshot server SHOULD make the choice visible as a
+      setting (Dart: the example's serveStrategiesWithoutContext constant,
+      default false) rather than hard-code either form.
+  api_key_requirement:
+    rule: >-
+      A snapshot server MUST connect to FeatureHub with a client-evaluated
+      API key (one containing `*`), so its repository holds every feature's
+      rollout strategies and can evaluate them for each request's context.
+    why: >-
+      With a server-evaluated key, FeatureHub evaluates the features for the
+      server's own single context and sends them without strategies.
+      Evaluating those "for a request's context" changes nothing, so every
+      client would silently get the server's one context's values, and the
+      ETag (the SHA of ids and versions) would not reveal it.
+    enforcement: >-
+      A snapshot server MUST refuse to run with a server-evaluated key:
+      either refuse to start, or answer every features request with an error
+      (e.g. 500 or 503) rather than serve another context's values. The
+      reference example refuses to start. (For the same reason the Redis
+      store refuses to attach to a server-evaluated key.)
+    feature_stores_and_no_key: >-
+      A server whose provider has no FeatureHub key (its features come from
+      stores, or from another server with sendContext false) is fine as long
+      as its features keep their strategies.
+
+# ---------------------------------------------------------------------------
+# 3. Snapshot client
+# ---------------------------------------------------------------------------
+client:
+  description: >-
+    Fetches snapshots from the server and loads them into a repository.
+    Reference: FeatureSnapshotClient and FeatureSnapshotTransport in
+    lib/src/transport/snapshot_transport.dart (scheduling shared with
+    FeatureHub polling: lib/src/transport/polling_transport.dart).
+  configuration:
+    url: {required: true, description: "Full URL of the endpoint; may already have query parameters."}
+    send_context: {default: "true for app/browser (client) providers, false for server providers", description: "Send the repository's context as query parameters."}
+    headers: {default: {}, description: "Sent with every request (gateway keys, auth, tracing)."}
+    interval: {description: "Poll interval; also how long a response stays fresh."}
+    request_timeout: {default: none, description: "Whole-request limit; exceeding it is an error (retried)."}
+    connect_timeout: {default: none, description: "Only for an HTTP client the SDK creates."}
+    http_client: {default: created, description: "Injectable (e.g. configured with a proxy)."}
+  request:
+    url_construction:
+      - if send_context is false, or the context has no attributes, use url unchanged (no trailing "?")
+      - "otherwise: the url's existing query parameters, then the context attributes (map of name -> list of strings, see featurehub-protocol.yaml encoding.evaluation_context), each list value as a repeated parameter; a context attribute replaces a same-named url parameter"
+    example:
+      url: https://my.app/api/features?app=web
+      context: {targetingKey: fred, country: nz, tags: [a, b]}
+      request: https://my.app/api/features?app=web&userkey=fred&country=nz&tags=a&tags=b
+    headers:
+      Accept: application/json
+      "<custom headers>": from configuration.headers
+      If-None-Match: 'the stored ETag, only if it was stored for exactly this request URL; otherwise omitted'
+      precedence: "when the client sends an If-None-Match (it has an ETag for this URL), it replaces a custom header of the same name"
+    freshness:
+      description: >-
+        Only for passivePolling, whose requests are unforced (activePolling
+        forces each poll and schedules them itself; see
+        featurehub-protocol.yaml polling_transport.active_polling).
+      rules:
+        - "record started = now before sending"
+        - "an unforced request is skipped while now < next_allowed"
+        - "after a 200 or 304: next_allowed = started + interval"
+  responses:
+    - status: 200
+      action:
+        - decode with encoding.feature_snapshot.decoding (a format error is an error, retried)
+        - "if the request URL (i.e. the context) changed while waiting, discard the response"
+        - "store etag = response ETag header, or '\"' + snapshot.sha + '\"' if absent; remember the URL it belongs to"
+        - "notify(features, snapshot.features) - a full set (featurehub-protocol.yaml transport.notifications)"
+    - status: 304
+      action: no change; update next_allowed
+    - status: "4xx except 429"
+      action: "permanent rejection: mark dead (no further requests), notify(failure)"
+    - status: "anything else (5xx, 429), network error, timeout"
+      action: raise an error; the caller logs it and a later request retries
+  retryable_429: >-
+    429 is retryable for the snapshot client only: your own server (or a
+    gateway in front of it) may rate-limit. FeatureHub's own APIs are
+    different: there every 4xx, 429 included, is permanent (see
+    featurehub-protocol.yaml featurehub_edge.polling and
+    featurehub_edge.streaming.connection_errors).
+  browser_notes: >-
+    Browsers pass author-set If-None-Match through and deliver a 304 to script
+    (verified in Chrome). A client MUST also cope with a 200 served from the
+    browser cache.
+
+# ---------------------------------------------------------------------------
+# 4. Conformance checks (each is a test in the reference implementation)
+# ---------------------------------------------------------------------------
+conformance:
+  - id: snapshot-roundtrip
+    check: "decode(encode(snapshot)) loads the same features; the client's repository SHA equals the server's"
+  - id: evaluate-for-context
+    given: "feature colour, value blue, strategy nz (country EQUALS nz) -> green"
+    expect:
+      "country=nz": {value: green, v: nz, strategies: absent}
+      "country=au": {value: blue, v: null}
+  - id: conditional-304
+    check: "a request with If-None-Match equal to the ETag (alone, as W/\"...\", or in a comma list) gets 304; another tag gets 200"
+  - id: client-if-none-match-per-url
+    check: "after a context change the first request carries no If-None-Match"
+  - id: client-discards-stale-context
+    check: "a response that arrives after the context changed is not loaded"
+  - id: client-rejection
+    check: "401, and 408, mark the client dead, notify failure, and stop polling"
+  - id: client-retry
+    check: "500, and 429, leave the repository not ready; the next poll succeeds"
+  - id: snapshot-api-choice
+    check: "featureSnapshot (or its equivalent) with no context and no choice made evaluates as for an empty context; with includeStrategies true it gives the strategies; with a non-empty context it evaluates for it either way; an empty context is treated as no context"
+  - id: server-empty-query
+    check: "a request with no query parameters gets the features evaluated as for an empty context by default, or with their strategies if the server chose that; with parameters, always evaluated for them"
