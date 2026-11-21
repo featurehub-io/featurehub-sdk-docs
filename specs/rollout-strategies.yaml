@@ -12,8 +12,8 @@
 # NORMATIVE SOURCE: the golden fixture, not this prose. Every behaviour here is
 # what the FeatureHub TypeScript SDK does (packages/core src/strategy_matcher),
 # captured as 5,940 matcher cases, 425 strategy scenarios, 400 percentages and
-# 15 hashes in featurehub-openfeatures-common/test/strategy/fixtures/
-# typescript_golden.json. Where this text and the fixture disagree, the
+# 15 hashes in fixtures/typescript_golden.json (next to this file, in
+# featurehub-sdk-docs). Where this text and the fixture disagree, the
 # fixture wins. FeatureHub Edge evaluates server-evaluated keys with its own
 # (Java) implementation; a difference between Edge and the fixture is a bug to
 # report, not something an SDK should copy.
@@ -245,8 +245,12 @@ matchers:
 # 5. The golden fixture: the conformance suite
 # ---------------------------------------------------------------------------
 golden_fixture:
-  repository: https://github.com/featurehub-io/featurehub-flutter-sdk
-  path: featurehub-openfeatures-common/test/strategy/fixtures/typescript_golden.json
+  path: specs/fixtures/typescript_golden.json   # in featurehub-sdk-docs, next to this file
+  copies: >-
+    SDKs keep their own copy for their tests, which MUST stay identical to
+    this one (the Dart SDK's is featurehub-openfeatures-common/test/strategy/
+    fixtures/typescript_golden.json in featurehub-flutter-sdk). Update this
+    copy first when the fixture is regenerated, then the SDKs' copies.
   format: a JSON object with four arrays
   sections:
     murmur:
@@ -270,7 +274,8 @@ golden_fixture:
       scenarios: {"percentage only": 132, "percentage attributes": 104, "percentage with attributes": 100, "attributes only": 8, "number and ip": 5, "now": 2, "now before": 1, "now date-time": 3, "absent non-date attribute": 3, "attribute lists": 4, "percentage with attributes does not stack": 40, "session list": 20, "empty strategy first": 3}
       now: "the now scenarios compare an absent date with 2000-01-01, so their results do not depend on when they run"
   regenerate: >-
-    From the TypeScript SDK with test/strategy/fixtures/generate.ts.txt: set
+    From the TypeScript SDK with the generator in featurehub-flutter-sdk,
+    featurehub-openfeatures-common/test/strategy/fixtures/generate.ts.txt: set
     its FEATUREHUB_JS_CORE path to featurehub-javascript-sdk/packages/core,
     bundle with esbuild (NODE_PATH=<packages/core>/node_modules esbuild
     generate.ts --bundle --platform=node --format=esm --outfile=generate.mjs),
