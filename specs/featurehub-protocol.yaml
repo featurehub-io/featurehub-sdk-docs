@@ -402,7 +402,7 @@ transport:
       features: features
       feature: feature
       delete_feature: deleteFeature
-      config: 'not a repository event: data {"edge.stale": true} means the environment will never change again: markEnvironmentStale(), then stop (no reconnect, no bye)'
+      config: 'not a repository event: data with an edge.stale key, whatever its value (true, false, null, anything), means the environment will never change again: markEnvironmentStale(), then stop (no reconnect, no bye)'
       error: ignore
   example_websocket_protocol:
     description: >-
@@ -552,7 +552,9 @@ featurehub_edge:
       - "failure: notify(failure), close; no reconnect"
       - "bye, or the stream dropping: notify(bye) (the provider stays ready; it is not reported as stale), and reconnect under the reconnect policy"
       - >-
-        config {"edge.stale": true}: arrives after the features have been
+        config with an edge.stale key: its presence alone means stale,
+        whatever the value ({"edge.stale": true}, {"edge.stale": false},
+        {"edge.stale": null} all do). It arrives after the features have been
         delivered; markEnvironmentStale(), close the stream, and do not
         reconnect or send bye. Readiness goes from Ready to Stale; the provider reports
         STALE, permanently.
@@ -594,6 +596,16 @@ featurehub_edge:
         its maximum number of attempts), nothing will reconnect: that is a
         permanent failure, so it MUST notify(failure), not bye
         (transport.permanent_failure).
+      requirement: >-
+        An SSE client MUST back off: consecutive failed attempts wait longer,
+        up to a maximum wait, and both the backoff (its delays and how they
+        grow) and that maximum MUST be configurable by the application. That
+        is all that is required of the delays. The rest of this section
+        (backoff, attempt_reset, minimums, reference_defaults) describes the
+        reference behaviour, which implementations SHOULD follow but need not
+        match exactly; an SSE library's own backoff is acceptable if it meets
+        the requirement. The classification of failures and stopping_for_good
+        are not delays and remain MUST.
       backoff: >-
         Retries SHOULD wait longer after a 5xx than after a network error, and
         SHOULD grow with each consecutive failure up to a cap, so a failing Edge
@@ -601,24 +613,24 @@ featurehub_edge:
         retrying; running out of attempts is then a permanent failure
         (stopping_for_good).
       attempt_reset: >-
-        The count of consecutive failures MUST reset only when the connection
+        The count of consecutive failures SHOULD reset only when the connection
         delivers a FeatureHub event showing it works: ack, features, feature,
         delete_feature or config. Not merely when it opens (a 200), and not on
         bye, error or failure: a server or proxy that accepts the connection
         and drops it at once (or only says bye) must still back off and use
         up the maximum attempts, rather than reconnect at the first-attempt
-        delay forever. The reset MUST happen before the end of that same
+        delay forever. The reset SHOULD happen before the end of that same
         stream is counted as the next failure: an implementation whose SSE
         library reports the stream ending separately from (and possibly
-        before) handing over the events before it MUST reset where the stream
+        before) handing over the events before it SHOULD reset where the stream
         is read (Go watches the response body's event: lines), not where the
         events are handled.
       minimums: >-
-        No configuration may make a tight reconnect loop. Every wait before a
-        reconnection attempt MUST be at least 100ms, after jitter and whatever
+        No configuration should make a tight reconnect loop. Every wait before a
+        reconnection attempt SHOULD be at least 100ms, after jitter and whatever
         the reconnect policy or the server says (policy delays and caps below
         it are raised to it). A server's SSE retry: field (milliseconds) that
-        replaces the network-error delay MUST be raised to at least 1 second
+        replaces the network-error delay SHOULD be raised to at least 1 second
         (retry: 10 would otherwise reconnect every 10ms); the backoff
         multiplier still applies to it.
       reference_defaults: >-
@@ -639,10 +651,11 @@ featurehub_edge:
         the same, plus up to 50% jitter, with core.MinReconnectDelay (100ms)
         and core.MinServerRetryDelay (1s) as the minimums.
       configuration: >-
-        Every value MUST be configurable by the application: the network-error
-        delay, the 5xx delay, the multiplier, the cap, the maximum number of
-        attempts, and which statuses are retried (Dart: the providers'
-        reconnectPolicy option).
+        The backoff and the maximum wait MUST be configurable by the
+        application (requirement). Where an implementation has them, the
+        network-error delay, the 5xx delay, the multiplier, the maximum number
+        of attempts, and which statuses are retried SHOULD be configurable too
+        (Dart: the providers' reconnectPolicy option).
       browsers: >-
         A browser's EventSource does not expose the status of a failed
         connection, so a browser client cannot tell a 4xx from a 5xx. A
@@ -678,17 +691,19 @@ conformance:
   - id: edge-polling-rejection
     check: "polling FeatureHub: any 4xx fails the repository and stops polling; a 5xx keeps polling"
   - id: edge-stale
-    check: "a 236 (polling) or edge.stale (streaming) after features: the repository's readiness is Stale, environmentStale is true, nothing more is requested, the provider reports STALE once"
+    check: "a 236 (polling) or edge.stale (streaming) after features: the repository's readiness is Stale, environmentStale is true, nothing more is requested, the provider reports STALE once. Any edge.stale value counts, false and null included"
   - id: bye-not-stale
     check: "a bye leaves the repository's readiness unchanged (Ready stays Ready, Stale stays Stale, nothing is broadcast), and the provider reports no event"
   - id: streaming-statuses
     check: "the default reconnect policy retries 1xx, 3xx and 5xx, and not any 4xx (429 included)"
   - id: streaming-not-an-event-stream
     check: "a 200 with Content-Type text/html is a failed connection (retried with the network-error delay, counted towards the maximum attempts)"
+  - id: streaming-backoff
+    check: "consecutive failed SSE connections wait increasingly longer, never longer than the configured maximum wait; changing the configured backoff and maximum changes the waits"
   - id: streaming-attempt-reset
-    check: "with a maximum of 3 attempts, a server that accepts and drops every connection (no events, or only bye) stops the client after 3 attempts; one whose every third connection delivers an ack keeps it running"
+    check: "(SHOULD) with a maximum of 3 attempts, a server that accepts and drops every connection (no events, or only bye) stops the client after 3 attempts; one whose every third connection delivers an ack keeps it running"
   - id: streaming-minimum-delays
-    check: "a policy with nanosecond delays and full jitter, and a server retry: 1, still wait at least 100ms before each attempt; a retry: below 1000 is used as 1 second"
+    check: "(SHOULD) a policy with nanosecond delays and full jitter, and a server retry: 1, still wait at least 100ms before each attempt; a retry: below 1000 is used as 1 second"
   - id: streaming-stops-for-good
     check: "the event source stopping for good (a 4xx, an unretried status, no attempts left) notifies failure, never bye"
   - id: permanent-failure
