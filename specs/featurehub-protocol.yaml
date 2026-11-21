@@ -419,7 +419,7 @@ transport:
 # ---------------------------------------------------------------------------
 providers:
   source_selection:
-    - {given: "host + apiKey", transport: "FeatureHub: FeatureHubSseTransport for streaming (the default), FeatureHubPollingTransport for activePolling or passivePolling"}
+    - {given: "host + apiKey", transport: "FeatureHub: FeatureHubSseTransport for streaming (the default), FeatureHubPollingTransport for activePolling or passivePolling. An SDK without server-evaluated streaming (featurehub_edge.streaming.server_evaluated) defaults a server-evaluated key to activePolling instead"}
     - {given: "featuresUrl, and no apiKey", transport: "your own server: FeatureSnapshotTransport, activePolling (the default, for the providers and FeatureHubConnection alike) or passivePolling; streaming is an error unless a transportFactory is given (feature-snapshot-protocol.yaml)"}
     - {given: "transportFactory", transport: "the custom transport (it may use any of host, apiKey, featuresUrl)"}
     - {given: "only stores", transport: "none; features come from stores"}
@@ -427,6 +427,7 @@ providers:
     - only one of host/apiKey given (empty strings count as not given)
     - featuresUrl together with host or apiKey
     - featuresUrl with streaming and no transportFactory
+    - "a server-evaluated key (no '*') with an explicit streaming mode and no transportFactory, in an SDK without server-evaluated streaming (featurehub_edge.streaming.server_evaluated)"
     - "nothing to get features from (no host+apiKey, featuresUrl, transportFactory or stores)"
     - "server provider: activePolling or passivePolling without a pollInterval (0 is a valid interval: poll once, polling_transport.interval.zero_polls_once)"
     - "a negative pollInterval, or one between 0 and 5 seconds (activePolling or passivePolling, FeatureHub or your own server; polling_transport.interval.minimum)"
@@ -542,11 +543,26 @@ featurehub_edge:
       EventSource cannot send headers), for a server-evaluated key; and, on
       dart:io, the extra headers (extra_headers) on every connection and
       reconnection.
+    server_evaluated:
+      requirement: >-
+        OPTIONAL. An SDK MAY support server-evaluated keys over streaming (the
+        context sent as described in request, on every connection and
+        reconnection); polling MUST support them. Client-evaluated keys
+        ('*') over streaming are not optional.
+      when_unsupported: >-
+        An SDK without it MUST NOT open a stream for a server-evaluated key,
+        since FeatureHub would evaluate without the context and the
+        application would get wrong values with no error. With no mode
+        given, a server-evaluated key defaults to activePolling (and is then
+        validated as activePolling: the server provider still needs a
+        pollInterval). An explicit streaming mode is a validation error
+        (providers.validation_errors), unless a transportFactory is given.
     go_status: >-
       The Go SDK does not support server-evaluated keys over streaming: it
       does not send the x-featurehub header (or the xfeaturehub parameter) on
-      the SSE connection. Go applications with a server-evaluated key use
-      polling, which does send it.
+      the SSE connection, so Go applications with a server-evaluated key
+      use polling, which does send it. It is bound by
+      server_evaluated.when_unsupported.
     events:
       - "features / feature / delete_feature: as transport.relaying_featurehub_events"
       - "failure: notify(failure), close; no reconnect"
@@ -713,7 +729,9 @@ conformance:
   - id: nullable-strategy-fields
     check: "strategies whose attributes, percentageAttributes or values are null or absent decode, and evaluate as empty lists"
   - id: connection-default-mode
-    check: "a FeatureHubConnection with a featuresUrl and no mode polls actively; with a host and key it streams"
+    check: "a FeatureHubConnection with a featuresUrl and no mode polls actively; with a host and key it streams (in an SDK without server-evaluated streaming, a server-evaluated key polls actively)"
+  - id: server-evaluated-streaming
+    check: "a server-evaluated key with streaming either sends the context on every connection and reconnection, or (in an SDK without server-evaluated streaming) never opens a stream: an explicit streaming mode is a validation error, and no mode polls actively"
   - id: passive
     check: "refreshIfStale fetches only after the interval; no requests of its own otherwise"
   - id: custom-transport
