@@ -27,6 +27,10 @@ spec:
   name: featurehub-feature-store
   version: 1.0.0
   status: implemented-in-dart
+  changelog:
+    - version: 1.0.0
+      changes:
+        - "First published version."
   related:
     encoding: featurehub-protocol.yaml encoding (FeatureState JSON, the SHA)
     resolution: openfeature-resolution.yaml (interceptors never create flags)

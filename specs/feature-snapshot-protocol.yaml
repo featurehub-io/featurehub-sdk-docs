@@ -36,6 +36,10 @@ spec:
   name: feature-snapshot-protocol
   version: 1.0.0
   status: implemented-in-dart
+  changelog:
+    - version: 1.0.0
+      changes:
+        - "First published version."
   related:
     featurehub_protocol: >-
       featurehub-protocol.yaml (FeatureState, the SHA, the evaluation context, polling
