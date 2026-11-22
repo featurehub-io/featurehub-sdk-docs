@@ -23,6 +23,10 @@ spec:
   name: featurehub-openfeature-resolution
   version: 1.0.0
   status: implemented-in-dart
+  changelog:
+    - version: 1.0.0
+      changes:
+        - "First published version."
   related:
     transports: featurehub-protocol.yaml (encoding of FeatureState, the context mapping, providers)
     stores: feature-store.yaml (how flags come to exist without FeatureHub, and the YAML store/interceptor pair)

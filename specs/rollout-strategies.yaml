@@ -31,6 +31,14 @@ spec:
   name: featurehub-rollout-strategies
   version: 1.1.0
   status: implemented-in-dart; conforms to the TypeScript SDK via the golden fixture
+  changelog:
+    - version: 1.1.0
+      changes:
+        - "js_conversions.strict_number: NUMBER attributes no longer use JavaScript's parseInt / parseFloat; a supplied value that is not a strict decimal number never matches, and values that are not numbers are ignored"
+        - "the golden fixture records the strict result, with TypeScript's own as `typescript` where it differs (170 NUMBER cases)"
+    - version: 1.0.0
+      changes:
+        - "First published version."
   related:
     encoding: featurehub-protocol.yaml (rollout_strategy JSON; context mapping)
     resolution: openfeature-resolution.yaml (SPLIT vs TARGETING_MATCH, DISABLED)
