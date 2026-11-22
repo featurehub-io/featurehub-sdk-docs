@@ -44,6 +44,11 @@ spec:
         - "providers.environment_variables.applies_to: environment variables apply only to server-side SDKs (Go, Python, Ruby, Dart's featurehub-openfeatures-server); client-side SDKs do not read them"
         - "providers.environment_variables.legacy_names: existing SDKs keep their legacy variables as they read them today, used only when neither new variable is set; the JavaScript millisecond exception now applies only to its legacy FEATUREHUB_POLLING_INTERVAL"
         - "featurehub_edge.sdk_version replaces featurehub_edge.sdk_identification: the sdk and version query parameters are dropped, and polling (activePolling and passivePolling) and streaming MUST send sdk_version=2 (spec.sdk_version, the protocol generation this specification defines; it changes only when the wire protocol to Edge changes, not with minor or patch releases of this specification). Every SDK that adheres to this specification sends the same URL, so a CDN in front of Edge is not fragmented by SDK, language or release"
+        - "featurehub_edge.sdk_version.generations: a request without sdk_version is generation 1. Edge honours Last-Event-ID, and holds quiet connections, only for sdk_version 2 or more; generation 1 always gets the full features on every connection"
+        - "featurehub_edge.query_parameters: the SDK's query parameters come in a fixed order, contextSha, sdk_version, then xfeaturehub (after the apiKey parameters when polling), so equal requests have equal URLs for a CDN. Streaming now sends contextSha too"
+        - "featurehub_edge.streaming.last_event_id.short_connections: a connection that ends less than 10 seconds after it opened, with a bye or without, is a failure (a cache in front of Edge replaying a closed stream), and nothing it delivers resets the failure count; consecutive ones SHOULD be logged as a likely cache misconfiguration"
+        - "providers.environment_variables.durations: every duration variable uses one strict grammar (a single number and a lowercase unit, ms, s, m or h, or 0), not Go's time.ParseDuration; compound values such as 1m30s are not accepted"
+        - "providers.environment_variables.legacy_names: only new SDKs (Dart and Go) implement this specification, and they read none of the legacy names"
     - version: 1.1.0
       changes:
         - "featurehub_edge.sdk_identification: polling (activePolling and passivePolling) and streaming MUST send sdk (the SDK's name/language) and version (the SDK's version) query parameters on every request to Edge"
@@ -540,40 +545,44 @@ providers:
       to environment variables, do not read them, and are configured in
       code only.
     precedence: >-
-      Configuration given in code always wins: an environment variable only
-      supplies what the application has not set itself (for example, an
-      explicit mode, interval or transportFactory means the polling
-      variables are not consulted for it).
+      Configuration given in code always wins, setting by setting: an
+      environment variable only supplies what the application has not set
+      itself. A mode given in code means FEATUREHUB_CONNECT_TYPE is not
+      consulted, but FEATUREHUB_CONNECT_INTERVAL still supplies the interval
+      if the code gives none (mode_selection.interval); an interval given in
+      code means FEATUREHUB_CONNECT_INTERVAL is not consulted; a
+      transportFactory means neither is.
     set: >-
       A variable counts as set when it is present and not empty (after
       trimming whitespace); an empty one is the same as an absent one.
     durations:
       format: >-
-        Every duration (intervals, delays, timeouts) is written as Go's
-        time.ParseDuration takes it: one or more decimal numbers, each with an
-        optional fraction and a unit - ns, us (or µs), ms, s, m, h - such as
-        30s, 1m30s, 500ms or 1.5h. The unit is REQUIRED: "30" is not a
-        duration (it would mean seconds to one SDK and milliseconds to
-        another). The single exception is "0", which needs no unit.
-      invalid: >-
-        A value that is not a duration (or, for BACKOFF_MULTIPLIER, not a
-        number) MUST NOT be used. For FEATUREHUB_CONNECT_INTERVAL it is a
-        validation error (providers.validation_errors), as is a value that
-        breaks connect_interval. For the other variables it is a validation
-        error, or the SDK logs a warning and uses its default.
-        No SDK accepts a value without a unit (other than "0") for any of
-        the names in `names`: units differ between the legacy variables
-        (legacy_names), so a bare number is never guessed at.
+        Every duration variable (intervals, delays, timeouts) is a single
+        decimal number, with an optional fraction, followed by a lowercase
+        time unit - ms, s, m or h - such as 30s, 500ms, 5m or 1.5h. There
+        are no spaces, no signs, no compound values (1m30s is not accepted)
+        and no other units. The unit is REQUIRED: "30" is not a duration (it
+        would mean seconds to one SDK and milliseconds to another). The
+        single exception is "0", which needs no unit. The value is trimmed
+        (as for `set`) before it is matched. This is deliberately not Go's
+        time.ParseDuration, nor any language's own parser: every SDK matches
+        the same regular expression, so a value is accepted by all of them or
+        by none.
+      grammar: '^(0|[0-9]+(\.[0-9]+)?(ms|s|m|h))$'
+      valid: ["0", "0s", "5s", "30s", "5000ms", "1.5m", "1h", "500ms"]
+      invalid: ["30", "1.5", "1m30s", "-30s", "+30s", "30 s", "30S", "1us", ".5s", "ten"]
+      multiplier: >-
+        FEATUREHUB_SSE_BACKOFF_MULTIPLIER is a number, not a duration:
+        '^[0-9]+(\.[0-9]+)?$', and at least 1.
+      invalid_values: >-
+        A value that does not match its grammar, or is out of its range, MUST
+        NOT be used. For FEATUREHUB_CONNECT_INTERVAL it is a validation error
+        (providers.validation_errors). For the other variables it is a
+        validation error, or the SDK logs a warning and uses its default.
       connect_interval:
-        format: >-
-          FEATUREHUB_CONNECT_INTERVAL is stricter than the other durations:
-          a single number followed by a time unit - ms, s, m or h - such as
-          30s, 500ms, 5m or 1.5h, with no spaces and no compound values
-          (1m30s is not accepted). 0 (or 0 with a unit, such as 0s) is the
-          only value that may leave the unit out.
-        grammar: '^(0|[0-9]+(\.[0-9]+)?(ms|s|m|h))$'
         allowed: >-
-          0, meaning connect once and stop (polling_transport.interval.zero_polls_once),
+          FEATUREHUB_CONNECT_INTERVAL takes the grammar above, and is 0,
+          meaning connect once and stop (polling_transport.interval.zero_polls_once),
           or at least 5 seconds (polling_transport.interval.minimum). Anything
           between 0 and 5 seconds (such as 3s or 500ms) is a validation error.
         valid: ["0", "0s", "5s", "30s", "5000ms", "1.5m", "1h"]
@@ -590,7 +599,7 @@ providers:
         FEATUREHUB_POLLING_REQ_TIMEOUT: "duration: how long a polling request may take before it is abandoned (requestTimeout)"
       streaming:
         FEATUREHUB_SSE_CONNECT_TIMEOUT: "duration: how long opening the stream may take before the attempt fails (connectTimeout)"
-        FEATUREHUB_SSE_READ_TIMEOUT: "duration: how long an open stream may go without data before it is treated as dropped and reconnected; more than 5 minutes, as Edge may send nothing for that long (featurehub_edge.streaming.last_event_id.quiet_connections)"
+        FEATUREHUB_SSE_READ_TIMEOUT: "duration: how long an open stream may go without data before it is treated as dropped and reconnected. It SHOULD be more than 5 minutes, as Edge may send nothing for that long, and an SDK SHOULD warn when it is less (featurehub_edge.streaming.last_event_id.quiet_connections)"
         FEATUREHUB_SSE_INITIAL_RETRY_DELAY: "duration: the wait before the first reconnection attempt after a failure (the backoff's base delay: featurehub_edge.streaming.connection_errors.backoff)"
         FEATUREHUB_SSE_MAX_RETRY_DELAY: "duration: the longest wait between reconnection attempts (the backoff's maximum)"
         FEATUREHUB_SSE_BACKOFF_MULTIPLIER: "number, at least 1: how much the wait grows after each consecutive failure"
@@ -601,23 +610,31 @@ providers:
       start with FEATUREHUB_, use FEATUREHUB_POLLING_ or FEATUREHUB_SSE_ for
       polling and streaming settings, and take durations as above.
     legacy_names:
-      rule: >-
-        Existing SDKs keep their legacy variables exactly as they read them
-        today: this specification does not change, unify or remove them,
-        because each SDK reads them slightly differently (units, defaults,
-        which one wins). An SDK reads its legacy variables only when none of
-        the names in `names` that replace them is set: if
+      new_sdks: >-
+        This specification is implemented only by new SDKs (Dart's
+        featurehub-openfeatures packages and Go), which have no earlier
+        release to stay compatible with. A new SDK MUST NOT read any legacy
+        name: only the names in `names` (and its own, under other_names).
+      existing_sdks: >-
+        When an existing SDK adopts this specification it keeps its legacy
+        variables exactly as it reads them today: this specification does
+        not change, unify or remove them, because each SDK reads them
+        slightly differently (units, defaults, which one wins). It reads them
+        only when none of the names in `names` that replace them is set: if
         FEATUREHUB_CONNECT_TYPE or FEATUREHUB_CONNECT_INTERVAL is set, the
         legacy mode and interval variables are not consulted at all, and
         mode_selection applies. It SHOULD log a deprecation warning when it
-        uses a legacy variable. A new SDK MUST NOT read any of them.
+        uses a legacy variable, and SHOULD name an ignored legacy variable in
+        the validation error when a new one is set without it (for example
+        FEATUREHUB_CONNECT_TYPE=passive with only the legacy interval).
       examples: >-
-        FEATUREHUB_POLLING_INTERVAL and FEATUREHUB_POLLING_PASSIVE (Go and
-        others; the JavaScript SDK reads FEATUREHUB_POLLING_INTERVAL as
-        milliseconds without a unit), FEATUREHUB_POLL_INTERVAL (seconds
-        without a unit, in the Python and Dart SDKs),
-        FEATUREHUB_POLL_HTTP_TIMEOUT (Ruby) and FEATUREHUB_POLL_TIMEOUT
-        (.NET).
+        FEATUREHUB_POLLING_INTERVAL and FEATUREHUB_POLLING_PASSIVE (Java,
+        JavaScript, Python and Ruby; JavaScript reads
+        FEATUREHUB_POLLING_INTERVAL as milliseconds without a unit, Ruby as
+        seconds), FEATUREHUB_POLL_INTERVAL (Python's earlier name, seconds
+        without a unit), FEATUREHUB_POLL_HTTP_TIMEOUT (Ruby), and
+        FEATUREHUB_API_KEY, FEATUREHUB_POLL_TIMEOUT, FEATUREHUB_DELAY_RETRY_MS
+        and FEATUREHUB_BACKOFF_RESET_THRESHOLD (.NET).
     mode_selection:
       description: >-
         When the application does not choose the mode in code (and gives no
@@ -649,7 +666,7 @@ providers:
           neither variable set is a validation error
           (providers.validation_errors), so the application must choose
           polling.
-      featuresUrl: "your own server (feature-snapshot-protocol.yaml) never streams by default: FEATUREHUB_CONNECT_TYPE chooses between active (the default) and passive, with the interval as in mode_selection.interval, and FEATUREHUB_CONNECT_TYPE=streaming is a validation error unless a transportFactory is given (providers.validation_errors)"
+      featuresUrl: "your own server (feature-snapshot-protocol.yaml) never streams by default: FEATUREHUB_CONNECT_TYPE chooses between active (the default) and passive, with the interval as in mode_selection.interval, and FEATUREHUB_CONNECT_TYPE=streaming is a validation error (providers.validation_errors). As there is no default interval, a featuresUrl with neither variable set and no interval in code is a validation error too"
   local_evaluation_rule:
     description: Whether resolutions evaluate strategies locally (clientEvaluated) or the source is sent the context (sendsContext = !clientEvaluated).
     rules:
@@ -752,20 +769,53 @@ featurehub_edge:
       protocol itself changes incompatibly (a new sdk_version), which is
       when a separate entry is wanted. For the same reason an SDK MUST NOT
       add query parameters of its own that identify it.
-    encoding: "sent exactly once; a decimal integer, so it needs no encoding"
+    encoding: "sent exactly once, in its place in the query string (query_parameters); a decimal integer, so it needs no encoding"
     precedence: >-
       It is the SDK's own parameter: no application configuration (extra
       headers, a host or URL that already carries a query string) replaces
       it.
+    generations:
+      "1": >-
+        A request without sdk_version: the SDKs before this specification.
+        Edge ignores their Last-Event-ID and sends the full features on every
+        streaming connection.
+      "2": >-
+        This specification. Edge honours Last-Event-ID and may hold a quiet
+        connection (streaming.last_event_id). An SDK MUST NOT send 2 unless
+        it implements streaming.last_event_id in full: keeping and sending
+        the id, quiet connections, bye_ends_cleanly, short_connections and
+        context_change.
     edge_behaviour: >-
       Edge does not require it and MUST NOT reject a request without it
       (older SDKs do not send it); it does not affect which features are
-      returned. Edge MAY use it to answer each sdk_version as its
-      specification requires.
+      returned. Edge depends on it to choose the behaviour of a generation:
+      it gives the quiet-connection behaviour (streaming.last_event_id) only
+      to sdk_version 2 or more, and treats a missing, empty or unparseable
+      sdk_version as 1.
     custom_transports: >-
       Not required of a custom transport (transport), which may not talk to
       Edge at all; one that does SHOULD send it, with the sdk_version whose
       specification it complies with.
+  query_parameters:
+    order: >-
+      A CDN keys on the URL exactly as sent, so the same request with its
+      parameters in another order is a different cache entry. The SDK's
+      query parameters MUST be sent in this order, each at most once:
+      apiKey (polling only, each key in the order given; streaming has the
+      key in the path), then contextSha, then sdk_version, then xfeaturehub
+      (browser streaming of a server-evaluated key only).
+    polling: "<host>/features?apiKey=<key>[&apiKey=<key>...]&contextSha=<sha>&sdk_version=2"
+    streaming: "<host>/features/<key>?contextSha=<sha>&sdk_version=2[&xfeaturehub=<context>]"
+    context_sha: >-
+      contextSha is the same value in both: the sha256 of the x-featurehub
+      header (encoding.evaluation_context.x_featurehub_header), or 0 when there is none (a
+      client-evaluated key, or no attributes). For streaming it keeps a CDN
+      from serving one context's stream for another, as the x-featurehub
+      header is not part of a cache key.
+    host_query: >-
+      A host that already carries a query string keeps it first, followed
+      by the SDK's parameters in the order above; a parameter of the same
+      name in the host is dropped, so each is sent once.
   polling:
     edge_api:
       description: >-
@@ -836,7 +886,8 @@ featurehub_edge:
         - "FeatureEnvironmentCollection.features: the definition does not make it nullable; decoders accept null as none (body)"
     request: >-
       GET <host>/features?apiKey=<key>[&apiKey=<key>...]&contextSha=<sha256
-      of the x-featurehub header, or 0>&sdk_version=2 (spec.sdk_version); with the x-featurehub header for a
+      of the x-featurehub header, or 0>&sdk_version=2 (spec.sdk_version), in
+      that order (query_parameters); with the x-featurehub header for a
       server-evaluated key, and the extra headers (extra_headers).
       sdk_version is required of every poll, active and passive
       (sdk_version). This is
@@ -908,12 +959,14 @@ featurehub_edge:
       snapshot_client: "not applied: the snapshot client (your own server; feature-snapshot-protocol.yaml) polls at its configured interval and uses ETags instead"
   streaming:
     request: >-
-      An SSE stream from <host>/features/<key>?sdk_version=2
-      (spec.sdk_version; required on every connection and
-      reconnection: sdk_version); for a server-evaluated key
+      An SSE stream from <host>/features/<key>?contextSha=<sha256 of the
+      x-featurehub header, or 0>&sdk_version=2 (spec.sdk_version; both
+      required on every connection and reconnection, in that order:
+      query_parameters); for a server-evaluated key
       (in an SDK that supports it: server_evaluated), sending the
-      x-featurehub header (dart:io) or the xfeaturehub query parameter
-      (browsers, whose EventSource cannot send headers); and, except in
+      x-featurehub header (dart:io) or the xfeaturehub query parameter,
+      after sdk_version (browsers, whose EventSource cannot send headers);
+      and, except in
       browsers, the extra headers (extra_headers) on every connection and
       reconnection; and, on a reconnection, Last-Event-ID (last_event_id).
     last_event_id:
@@ -946,13 +999,61 @@ featurehub_edge:
         failure (connection_errors), and the client backs off, or stops for
         good, while Edge is healthy.
       bye_ends_cleanly: >-
-        Edge always sends bye when it closes a connection itself. A
-        connection that ends after a bye ended cleanly: it is not a failure,
-        it resets the count of consecutive failures
-        (connection_errors.attempt_reset), and the client reconnects (with
-        its Last-Event-ID) after the first-attempt delay. A connection that
-        ends without a bye ended with an error, and is counted as a failure
-        (connection_errors.classification).
+        Edge always sends bye when it closes a connection itself, and only
+        when it evicts the connection at the end of its wait (60 seconds or
+        more). A connection that ends after a bye, and that was open for at
+        least the short-connection threshold (short_connections), ended
+        cleanly: it is not a failure, it resets the count of consecutive
+        failures (connection_errors.attempt_reset), and the client
+        reconnects (with its Last-Event-ID) after the first-attempt delay. A
+        connection that ends without a bye ended with an error, and is
+        counted as a failure (connection_errors.classification).
+      short_connections:
+        threshold: 10 seconds
+        rule: >-
+          Edge never ends a connection of its own accord sooner than the end
+          of its wait, so a connection that ends less than 10 seconds after
+          it opened did not come from Edge working normally, whether it ended
+          with a bye or not. It MUST be counted as a failure (the
+          network-error delay, growing with the backoff, and counting towards
+          the maximum attempts: connection_errors), and nothing it delivered
+          resets the count of consecutive failures (attempt_reset) - not its
+          bye, nor its ack, features or other events. Its events are still
+          handled as usual (features applied, edge.stale obeyed).
+        why: >-
+          A cache or CDN in front of Edge that does not handle SSE correctly
+          can answer at once with a stored, already-closed stream ending in
+          bye. That usually happens to a cache entry that Edge has stopped
+          updating, after it sent edge.stale on it. Were that bye a clean
+          end, every client behind the cache would reconnect at the
+          first-attempt delay, for ever. Counted as failures, they back off to
+          the maximum wait, and stop where a maximum number of attempts is
+          configured (a permanent failure: stopping_for_good).
+        reset_timing: >-
+          The reset an event earns (attempt_reset) therefore takes effect
+          once the connection has been open for the threshold: an event in
+          the first 10 seconds marks the reset as due, and it is made when the
+          connection reaches 10 seconds (or at once, for an event after
+          that). A connection that ends before then counts as a failure and
+          the due reset is dropped.
+        diagnosis: >-
+          After 3 consecutive short connections an SDK SHOULD log a warning,
+          once until a connection lasts past the threshold, saying that
+          something in front of Edge is ending its event streams early and
+          that SSE responses must not be cached (Edge's event streams are not
+          cacheable; a CDN must pass them through, or bypass them).
+        tests: >-
+          An SDK MAY lower the threshold for its own tests (as with
+          polling_transport.interval.minimum), but MUST NOT let applications
+          change it.
+        browsers: >-
+          A browser's EventSource reconnects by itself, without telling the
+          client how long the connection lasted, and does not back off. A
+          browser SDK SHOULD apply the rule where it can see the connection:
+          from its open event to the error or bye that ends it. If short
+          connections reach the maximum attempts (or, without one, a run of
+          them that never stops) it closes the EventSource and treats it as
+          a permanent failure (connection_errors.browsers).
       context_change: >-
         The Last-Event-ID belongs to the API key and context it was received
         for, as the ETag does when polling (featurehub_edge.polling.etag): a
@@ -988,7 +1089,7 @@ featurehub_edge:
     events:
       - "features / feature / delete_feature: as transport.relaying_featurehub_events"
       - "failure: notify(failure), close; no reconnect"
-      - "bye: notify(bye) (the provider stays ready; it is not reported as stale); the connection ends cleanly, and the client reconnects with its Last-Event-ID (last_event_id.bye_ends_cleanly)"
+      - "bye: notify(bye) (the provider stays ready; it is not reported as stale); the connection ends cleanly, and the client reconnects with its Last-Event-ID (last_event_id.bye_ends_cleanly), unless it was a short connection, which is a failure (last_event_id.short_connections)"
       - "the stream dropping without a bye: notify(bye), and reconnect under the reconnect policy, counted as a failure (connection_errors)"
       - >-
         config with an edge.stale key: its presence alone means stale,
@@ -1066,7 +1167,9 @@ featurehub_edge:
         failure: a server or proxy that accepts the connection and drops it
         without any of these events must still back off and use up the
         maximum attempts, rather than reconnect at the first-attempt delay
-        forever. The reset SHOULD happen before the end of that same
+        forever. Nor in a short connection (last_event_id.short_connections):
+        the reset an event earns is made only once the connection has been
+        open for the threshold. The reset SHOULD happen before the end of that same
         stream is counted as the next failure: an implementation whose SSE
         library reports the stream ending separately from (and possibly
         before) handing over the events before it SHOULD reset where the stream
@@ -1173,16 +1276,25 @@ conformance:
   - id: streaming-backoff
     check: "consecutive failed SSE connections wait increasingly longer, never longer than the configured maximum wait; changing the configured backoff and maximum changes the waits"
   - id: streaming-attempt-reset
-    check: "(SHOULD) with a maximum of 3 attempts, a server that accepts and drops every connection with no events stops the client after 3 attempts; one whose every third connection delivers an ack keeps it running, and so does one whose every connection only sends bye after a silence"
+    check: "(SHOULD) with a maximum of 3 attempts, a server that accepts and drops every connection with no events stops the client after 3 attempts; one whose every third connection delivers an ack keeps it running, and so does one whose every connection only sends bye after a silence longer than the short-connection threshold"
   - id: streaming-last-event-id
     check: >-
       after features with id: fields, a reconnection sends the last id as
       Last-Event-ID (a bye with no id: field does not change it); a server
       that then sends nothing for a while and only bye, many times in a row,
       leaves the repository's features and readiness unchanged, is never
-      counted as a failure and never stops the client; a stream silent for 5
-      minutes is not dropped by the default read timeout; a connection for a
-      new context sends no Last-Event-ID
+      counted as a failure and never stops the client; the default read
+      timeout is more than 5 minutes (checked by its value; a test need not
+      wait); a connection for a new context sends no Last-Event-ID
+  - id: streaming-short-connections
+    check: >-
+      (with the threshold lowered for the test) with a maximum of 3
+      attempts, a server whose every connection sends features, or nothing,
+      and then bye, and closes before the threshold, stops the client after
+      3 attempts (a permanent failure), the waits between them growing as
+      for any failure; the features are still applied; a warning is logged
+      after 3 short connections in a row; one whose connections last past
+      the threshold before their bye never stops it
   - id: streaming-minimum-delays
     check: "(SHOULD) a policy with nanosecond delays and full jitter, and a server retry: 1, still wait at least 100ms before each attempt; a retry: below 1000 is used as 1 second"
   - id: streaming-stops-for-good
@@ -1213,8 +1325,10 @@ conformance:
       no FEATUREHUB_CONNECT_TYPE means active
   - id: environment-durations
     check: >-
-      30s, 1m30s, 500ms and 0 are durations for the other duration
-      variables; 30, 1.5 and ten are not
+      every duration variable accepts 0, 0s, 30s, 500ms, 1.5m and 1h, and
+      accepts " 30s " (trimmed); 30, 1.5, 1m30s, -30s, +30s, "30 s", 30S,
+      1us, .5s and ten are not durations; FEATUREHUB_SSE_BACKOFF_MULTIPLIER
+      accepts 1 and 1.5, not 0.5, 2x or -1
   - id: environment-connect-interval
     check: >-
       FEATUREHUB_CONNECT_INTERVAL accepts 0, 0s, 5s, 30s, 5000ms, 1.5m and
@@ -1233,6 +1347,8 @@ conformance:
     check: "a server-evaluated key with streaming, in an SDK that supports it, sends the context on every connection and reconnection; in one that does not, it is rejected at configuration and no stream is opened; with activePolling or passivePolling it polls, sending x-featurehub"
   - id: sdk-version
     check: "every request to Edge - each activePolling and passivePolling poll, and each streaming connection and reconnection, in browsers too - carries exactly one sdk_version query parameter, 2 (spec.sdk_version) for this specification, and no parameter naming the SDK, its language or its release; extra headers or configuration cannot replace it"
+  - id: query-parameter-order
+    check: "a poll's query string is apiKey (each, in order), contextSha, sdk_version; a stream's is contextSha, sdk_version, then xfeaturehub (browser, server-evaluated key); streaming sends contextSha (0 for a client-evaluated key); a host with a query string keeps it first, and a parameter of the same name in it is not sent twice"
   - id: passive
     check: "refreshIfStale fetches only after the interval; no requests of its own otherwise"
   - id: custom-transport
