@@ -32,9 +32,18 @@
 
 spec:
   name: featurehub-protocol
-  version: 1.1.0
+  version: 1.1.1
+  sdk_version: 2
   status: implemented-in-dart
   changelog:
+    - version: 1.1.1
+      changes:
+        - "featurehub_edge.streaming.last_event_id: SSE clients keep the last event id and send it as Last-Event-ID on reconnection (not for a new context). Edge then sends no features if nothing is new: it holds the connection (typically 60 seconds, up to 3 to 5 minutes), possibly silent, then sends bye and closes, so several reconnections may bring no updates. A bye ends a connection cleanly and resets the failure count (attempt_reset); read timeouts SHOULD exceed 5 minutes"
+        - "providers.environment_variables: FEATUREHUB_CONNECT_TYPE (active, passive or streaming) and FEATUREHUB_CONNECT_INTERVAL replace FEATUREHUB_POLLING_INTERVAL and FEATUREHUB_POLLING_PASSIVE, and give the default mode and interval (mode_selection). Active and passive both need an interval, in code or from FEATUREHUB_CONNECT_INTERVAL (passive no longer defaults to 0); streaming does not use it"
+        - "providers.environment_variables.durations.connect_interval: FEATUREHUB_CONNECT_INTERVAL is a single number followed by a time unit (ms, s, m, h), and is 0 (connect once and stop) or at least 5 seconds"
+        - "providers.environment_variables.applies_to: environment variables apply only to server-side SDKs (Go, Python, Ruby, Dart's featurehub-openfeatures-server); client-side SDKs do not read them"
+        - "providers.environment_variables.legacy_names: existing SDKs keep their legacy variables as they read them today, used only when neither new variable is set; the JavaScript millisecond exception now applies only to its legacy FEATUREHUB_POLLING_INTERVAL"
+        - "featurehub_edge.sdk_version replaces featurehub_edge.sdk_identification: the sdk and version query parameters are dropped, and polling (activePolling and passivePolling) and streaming MUST send sdk_version=2 (spec.sdk_version, the protocol generation this specification defines; it changes only when the wire protocol to Edge changes, not with minor or patch releases of this specification). Every SDK that adheres to this specification sends the same URL, so a CDN in front of Edge is not fragmented by SDK, language or release"
     - version: 1.1.0
       changes:
         - "featurehub_edge.sdk_identification: polling (activePolling and passivePolling) and streaming MUST send sdk (the SDK's name/language) and version (the SDK's version) query parameters on every request to Edge"
@@ -260,10 +269,13 @@ polling_transport:
       the analyzer warns about, can change it).
     negative: a negative interval is a validation error (providers.validation_errors)
     absent: >-
-      Where an interval is required (the server provider polling), it MUST be
-      given explicitly; where a missing interval defaults to 0
-      (FEATUREHUB_POLLING_PASSIVE without FEATUREHUB_POLLING_INTERVAL:
-      providers.environment_variables), that is poll once, as above.
+      Where an interval is required (the server provider polling, and
+      activePolling or passivePolling chosen through FEATUREHUB_CONNECT_TYPE:
+      providers.environment_variables.mode_selection), it MUST be given
+      explicitly, in code or by FEATUREHUB_CONNECT_INTERVAL; 0 (poll once)
+      is an explicit interval. Where an SDK's legacy variables default a
+      missing interval to 0 (providers.environment_variables.legacy_names),
+      that is poll once, as above.
   start:
     - "if the repository is already ready (e.g. loaded from a store): request in the background; else await the first request"
     - "then, with activePolling, schedule the next poll (none with an interval of 0: interval.zero_polls_once)"
@@ -521,10 +533,12 @@ providers:
       The environment variables an SDK reads its configuration from, so that
       the same deployment settings work whichever SDK an application uses.
     applies_to: >-
-      Every SDK that can read environment variables (servers, command line
-      tools, containers) MUST support the names in `names` with the meanings
-      given there. An SDK on a platform without them (a browser, a mobile
-      app) is exempt and is configured in code only.
+      Server-side SDKs only (for example Go, Python, Ruby, and Dart's
+      featurehub-openfeatures-server): every one MUST support the names in
+      `names` with the meanings given there. Client-side SDKs (browsers,
+      mobile and desktop apps, Dart's client provider) do not have access
+      to environment variables, do not read them, and are configured in
+      code only.
     precedence: >-
       Configuration given in code always wins: an environment variable only
       supplies what the application has not set itself (for example, an
@@ -543,29 +557,40 @@ providers:
         another). The single exception is "0", which needs no unit.
       invalid: >-
         A value that is not a duration (or, for BACKOFF_MULTIPLIER, not a
-        number) MUST NOT be used. For FEATUREHUB_POLLING_INTERVAL it is a
-        validation error (providers.validation_errors), as are an interval
-        that is negative or between 0 and 5 seconds
-        (polling_transport.interval.minimum). For the other variables it is a
-        validation error, or the SDK logs a warning and uses its default.
-      javascript_exception: >-
-        The JavaScript SDK has always read FEATUREHUB_POLLING_INTERVAL as a
-        number of milliseconds. To stay compatible, it treats a value with no
-        unit as milliseconds ("5000" is 5s); a value with a unit is a
-        duration as above. No other SDK, and no other variable, accepts a
-        value without a unit.
+        number) MUST NOT be used. For FEATUREHUB_CONNECT_INTERVAL it is a
+        validation error (providers.validation_errors), as is a value that
+        breaks connect_interval. For the other variables it is a validation
+        error, or the SDK logs a warning and uses its default.
+        No SDK accepts a value without a unit (other than "0") for any of
+        the names in `names`: units differ between the legacy variables
+        (legacy_names), so a bare number is never guessed at.
+      connect_interval:
+        format: >-
+          FEATUREHUB_CONNECT_INTERVAL is stricter than the other durations:
+          a single number followed by a time unit - ms, s, m or h - such as
+          30s, 500ms, 5m or 1.5h, with no spaces and no compound values
+          (1m30s is not accepted). 0 (or 0 with a unit, such as 0s) is the
+          only value that may leave the unit out.
+        grammar: '^(0|[0-9]+(\.[0-9]+)?(ms|s|m|h))$'
+        allowed: >-
+          0, meaning connect once and stop (polling_transport.interval.zero_polls_once),
+          or at least 5 seconds (polling_transport.interval.minimum). Anything
+          between 0 and 5 seconds (such as 3s or 500ms) is a validation error.
+        valid: ["0", "0s", "5s", "30s", "5000ms", "1.5m", "1h"]
+        invalid: ["30", "3s", "500ms", "1m30s", "-30s", "30 s", "ten"]
     names:
       connection:
         FEATUREHUB_EDGE_URL: "the FeatureHub Edge URL (host), when not given in code"
         FEATUREHUB_CLIENT_API_KEY: "a client-evaluated API key (containing '*'), when no key is given in code"
         FEATUREHUB_SERVER_API_KEY: "a server-evaluated API key, used when no key is given in code and FEATUREHUB_CLIENT_API_KEY is not set"
+      mode:
+        FEATUREHUB_CONNECT_TYPE: "active, passive or streaming: the mode (activePolling, passivePolling or streaming), when not given in code (mode_selection). Compared case-insensitively after trimming; any other value is a validation error (providers.validation_errors)"
+        FEATUREHUB_CONNECT_INTERVAL: "a number followed by a time unit, 0 or at least 5 seconds (durations.connect_interval): the polling interval (pollInterval) for both active and passive, when not given in code (mode_selection). Not used by streaming"
       polling:
-        FEATUREHUB_POLLING_INTERVAL: "duration: the polling interval (pollInterval); setting it chooses polling (mode_selection)"
-        FEATUREHUB_POLLING_PASSIVE: "set (to any value, its content is not read): chooses passivePolling (mode_selection)"
         FEATUREHUB_POLLING_REQ_TIMEOUT: "duration: how long a polling request may take before it is abandoned (requestTimeout)"
       streaming:
         FEATUREHUB_SSE_CONNECT_TIMEOUT: "duration: how long opening the stream may take before the attempt fails (connectTimeout)"
-        FEATUREHUB_SSE_READ_TIMEOUT: "duration: how long an open stream may go without data before it is treated as dropped and reconnected"
+        FEATUREHUB_SSE_READ_TIMEOUT: "duration: how long an open stream may go without data before it is treated as dropped and reconnected; more than 5 minutes, as Edge may send nothing for that long (featurehub_edge.streaming.last_event_id.quiet_connections)"
         FEATUREHUB_SSE_INITIAL_RETRY_DELAY: "duration: the wait before the first reconnection attempt after a failure (the backoff's base delay: featurehub_edge.streaming.connection_errors.backoff)"
         FEATUREHUB_SSE_MAX_RETRY_DELAY: "duration: the longest wait between reconnection attempts (the backoff's maximum)"
         FEATUREHUB_SSE_BACKOFF_MULTIPLIER: "number, at least 1: how much the wait grows after each consecutive failure"
@@ -575,29 +600,56 @@ providers:
       An SDK MAY read further variables for settings of its own. They MUST
       start with FEATUREHUB_, use FEATUREHUB_POLLING_ or FEATUREHUB_SSE_ for
       polling and streaming settings, and take durations as above.
-    previous_names: >-
-      An SDK MAY keep reading a name it used before this specification (for
-      example FEATUREHUB_POLL_INTERVAL, in seconds without a unit, in the
-      Python and Dart SDKs; FEATUREHUB_POLL_HTTP_TIMEOUT in Ruby;
-      FEATUREHUB_POLL_TIMEOUT in .NET), in its old format, when the new name
-      is not set, and SHOULD log a deprecation warning when it does. A new
-      SDK MUST NOT read any of them.
+    legacy_names:
+      rule: >-
+        Existing SDKs keep their legacy variables exactly as they read them
+        today: this specification does not change, unify or remove them,
+        because each SDK reads them slightly differently (units, defaults,
+        which one wins). An SDK reads its legacy variables only when none of
+        the names in `names` that replace them is set: if
+        FEATUREHUB_CONNECT_TYPE or FEATUREHUB_CONNECT_INTERVAL is set, the
+        legacy mode and interval variables are not consulted at all, and
+        mode_selection applies. It SHOULD log a deprecation warning when it
+        uses a legacy variable. A new SDK MUST NOT read any of them.
+      examples: >-
+        FEATUREHUB_POLLING_INTERVAL and FEATUREHUB_POLLING_PASSIVE (Go and
+        others; the JavaScript SDK reads FEATUREHUB_POLLING_INTERVAL as
+        milliseconds without a unit), FEATUREHUB_POLL_INTERVAL (seconds
+        without a unit, in the Python and Dart SDKs),
+        FEATUREHUB_POLL_HTTP_TIMEOUT (Ruby) and FEATUREHUB_POLL_TIMEOUT
+        (.NET).
     mode_selection:
       description: >-
         When the application does not choose the mode in code (and gives no
-        transportFactory), the SDK chooses it from the environment, in this
+        transportFactory), the SDK takes the default mode and interval from
+        FEATUREHUB_CONNECT_TYPE and FEATUREHUB_CONNECT_INTERVAL, in this
         order. The first rule that applies wins.
+      interval: >-
+        FEATUREHUB_CONNECT_INTERVAL applies to both active and passive. When
+        either is chosen, the interval MUST be given, either in code (the
+        pollInterval passed to the provider or connection) or by
+        FEATUREHUB_CONNECT_INTERVAL; the one in code wins. With neither it is
+        a validation error (providers.validation_errors): there is no
+        default interval, not even 0.
       rules:
-        - "FEATUREHUB_POLLING_PASSIVE set: passivePolling, at FEATUREHUB_POLLING_INTERVAL if that is set, otherwise an interval of 0 (fetch once: polling_transport.interval.zero_polls_once). For any key"
-        - "otherwise FEATUREHUB_POLLING_INTERVAL set: activePolling at that interval. For any key"
+        - "FEATUREHUB_CONNECT_TYPE=active: activePolling at the interval (mode_selection.interval). For any key"
+        - "FEATUREHUB_CONNECT_TYPE=passive: passivePolling at the interval (mode_selection.interval). For any key"
         - >-
-          otherwise streaming. For a client-evaluated key always; for a
+          FEATUREHUB_CONNECT_TYPE=streaming: streaming.
+          FEATUREHUB_CONNECT_INTERVAL is not used (an SDK SHOULD log a
+          warning if it is set). For a server-evaluated key only in an SDK
+          that supports server-evaluated streaming
+          (featurehub_edge.streaming.server_evaluated); in one that does not
+          it is a validation error (providers.validation_errors)
+        - "FEATUREHUB_CONNECT_TYPE not set, FEATUREHUB_CONNECT_INTERVAL set: activePolling at that interval. For any key"
+        - >-
+          neither set: streaming. For a client-evaluated key always; for a
           server-evaluated key only in an SDK that supports server-evaluated
-          streaming (featurehub_edge.streaming.server_evaluated) - in one that
-          does not, a server-evaluated key with neither variable set is a
-          validation error (providers.validation_errors), so the application
-          must choose polling.
-      featuresUrl: "your own server (feature-snapshot-protocol.yaml) never streams by default: the polling variables choose between activePolling (the default) and passivePolling, and streaming is never chosen from the environment"
+          streaming - in one that does not, a server-evaluated key with
+          neither variable set is a validation error
+          (providers.validation_errors), so the application must choose
+          polling.
+      featuresUrl: "your own server (feature-snapshot-protocol.yaml) never streams by default: FEATUREHUB_CONNECT_TYPE chooses between active (the default) and passive, with the interval as in mode_selection.interval, and FEATUREHUB_CONNECT_TYPE=streaming is a validation error unless a transportFactory is given (providers.validation_errors)"
   local_evaluation_rule:
     description: Whether resolutions evaluate strategies locally (clientEvaluated) or the source is sent the context (sendsContext = !clientEvaluated).
     rules:
@@ -669,43 +721,51 @@ featurehub_edge:
       The providers' and FeatureHubConnection's `headers` option, passed to
       FeatureHubRestClient (polling) and the SSE listener (streaming); custom
       transports get them as FeatureHubTransportTarget.headers.
-  sdk_identification:
+  sdk_version:
     rule: >-
       Both FeatureHub transports, polling (activePolling and passivePolling)
-      and streaming, MUST send two query parameters with every request to
-      Edge: each poll, and each streaming connection and reconnection
-      (browsers included, as they are query parameters, not headers). They
-      let Edge and the people running it see which SDKs, and which versions
-      of them, are connecting.
-    parameters:
-      sdk: >-
-        The SDK's name, identifying its language or platform, in lowercase
-        (e.g. dart, go, python, dotnet, ruby, java, typescript, javascript).
-        It names the SDK, not the application, and is fixed by the SDK: the
-        application MUST NOT be able to change it. An SDK with distinct
-        flavours MAY name them (e.g. typescript-browser), keeping the
-        language first.
-      version: >-
-        The SDK's own version (its released package version, e.g. 3.1.0),
-        not the application's and not the Edge API's. It SHOULD come from
-        the package's build or release metadata rather than a hand-kept
-        constant, so it cannot drift from the release.
-    encoding: >-
-      Both values are query-component-encoded
-      (context.x_featurehub_header.query_component_encode). They MUST be
-      present and non-empty; an SDK that cannot determine its version sends
-      "unknown" rather than leaving the parameter out.
+      and streaming, MUST send the sdk_version query parameter with every
+      request to Edge: each poll, and each streaming connection and
+      reconnection (browsers included, as it is a query parameter, not a
+      header).
+    value: >-
+      The protocol generation this specification defines (spec.sdk_version),
+      as a decimal integer with no leading zeros: an SDK that complies with
+      this specification sends sdk_version=2. It is deliberately not
+      spec.version, nor its major part: minor and patch releases of this
+      specification change behaviour (scheduling, readiness, environment
+      variables, validation) without changing what goes over the wire, and
+      would split the cache for nothing. sdk_version changes only when the
+      wire protocol to Edge changes (the requests an SDK sends, or the
+      responses it relies on), whatever spec.version does. It does not name the SDK, its language or its own release
+      version, and it is fixed by the SDK: the application MUST NOT be able
+      to change it. An SDK MUST NOT send an sdk_version whose wire protocol
+      it does not fully implement.
+    why_not_per_sdk: >-
+      It deliberately says nothing about which SDK is calling. A CDN (or any
+      cache) in front of Edge keys on the whole URL, query string included,
+      so a parameter naming each SDK and its release would split the cache
+      into one copy per SDK, language and release, all holding the same
+      features. Every SDK that speaks the same wire protocol sends the same
+      requests, whichever release of this specification it follows, so they send the same
+      sdk_version and share one cache entry; the cache splits only when the
+      protocol itself changes incompatibly (a new sdk_version), which is
+      when a separate entry is wanted. For the same reason an SDK MUST NOT
+      add query parameters of its own that identify it.
+    encoding: "sent exactly once; a decimal integer, so it needs no encoding"
     precedence: >-
-      They are the SDK's own parameters: no application configuration
-      (extra headers, a host or URL that already carries a query string)
-      replaces them, and each is sent exactly once.
+      It is the SDK's own parameter: no application configuration (extra
+      headers, a host or URL that already carries a query string) replaces
+      it.
     edge_behaviour: >-
-      Edge does not require them and MUST NOT reject a request without them
-      (older SDKs do not send them); they do not affect which features are
-      returned, nor caching beyond what any query parameter does.
+      Edge does not require it and MUST NOT reject a request without it
+      (older SDKs do not send it); it does not affect which features are
+      returned. Edge MAY use it to answer each sdk_version as its
+      specification requires.
     custom_transports: >-
       Not required of a custom transport (transport), which may not talk to
-      Edge at all; one that does SHOULD send them, identifying itself.
+      Edge at all; one that does SHOULD send it, with the sdk_version whose
+      specification it complies with.
   polling:
     edge_api:
       description: >-
@@ -765,8 +825,8 @@ featurehub_edge:
       not_in_the_definition: >-
         The definition documents only the operation itself. The rest of the
         contract the SDKs rely on is specified here: the x-featurehub request
-        header (request) and the extra headers (extra_headers); the sdk and
-        version query parameters (sdk_identification); If-None-Match,
+        header (request) and the extra headers (extra_headers); the sdk_version
+        query parameter (sdk_version); If-None-Match,
         ETag and 304 (etag); Cache-Control (cache_control); and the statuses
         it does not list - 304, every other 4xx and the 5xx (responses).
       differences:
@@ -776,10 +836,10 @@ featurehub_edge:
         - "FeatureEnvironmentCollection.features: the definition does not make it nullable; decoders accept null as none (body)"
     request: >-
       GET <host>/features?apiKey=<key>[&apiKey=<key>...]&contextSha=<sha256
-      of the x-featurehub header, or 0>&sdk=<sdk name>&version=<sdk
-      version>; with the x-featurehub header for a server-evaluated key, and
-      the extra headers (extra_headers). sdk and version are required of
-      every poll, active and passive (sdk_identification). This is
+      of the x-featurehub header, or 0>&sdk_version=2 (spec.sdk_version); with the x-featurehub header for a
+      server-evaluated key, and the extra headers (extra_headers).
+      sdk_version is required of every poll, active and passive
+      (sdk_version). This is
       edge_api's getFeatureStates.
     several_api_keys: >-
       An SDK MAY accept several API keys, sent as repeated apiKey
@@ -848,14 +908,59 @@ featurehub_edge:
       snapshot_client: "not applied: the snapshot client (your own server; feature-snapshot-protocol.yaml) polls at its configured interval and uses ETags instead"
   streaming:
     request: >-
-      An SSE stream from <host>/features/<key>?sdk=<sdk name>&version=<sdk
-      version> (both required on every connection and reconnection:
-      sdk_identification); for a server-evaluated key
+      An SSE stream from <host>/features/<key>?sdk_version=2
+      (spec.sdk_version; required on every connection and
+      reconnection: sdk_version); for a server-evaluated key
       (in an SDK that supports it: server_evaluated), sending the
       x-featurehub header (dart:io) or the xfeaturehub query parameter
       (browsers, whose EventSource cannot send headers); and, except in
       browsers, the extra headers (extra_headers) on every connection and
-      reconnection.
+      reconnection; and, on a reconnection, Last-Event-ID (last_event_id).
+    last_event_id:
+      rule: >-
+        Edge's events carry an SSE id: field. An SSE client MUST keep the id
+        of the last event it received (as the SSE standard's last event ID:
+        an event with no id: field, such as Edge's bye, leaves it as it was)
+        and MUST send it as the Last-Event-ID header on every reconnection.
+        A browser's EventSource does this itself on the reconnections it
+        makes; a new EventSource starts without one, and gets the full
+        features.
+      no_new_updates: >-
+        With a Last-Event-ID that is current, Edge does not send the features
+        again. It holds the connection open for a period (typically 60
+        seconds, but it can be 3 to 5 minutes) during which it may send
+        nothing at all, then sends bye (with no id: field) and closes the
+        connection; or the connection ends with an error, because of a
+        network issue. An SDK MUST expect this: a connection, and several
+        reconnections in a row, may deliver no updates at all before the
+        next change arrives. It is normal, not a failure, not a lost
+        connection and not stale: the repository keeps its features, and
+        its readiness does not change (Ready stays Ready).
+      quiet_connections: >-
+        Because Edge may send nothing for up to 5 minutes before its bye, an
+        SDK MUST NOT treat a stream that is silent for less than that as
+        dropped. A read timeout (FEATUREHUB_SSE_READ_TIMEOUT, or the SDK's
+        own setting), where an SDK has one, SHOULD default to more than 5
+        minutes, and an SDK SHOULD warn when one is configured below it:
+        otherwise every quiet connection ends as a timeout, counted as a
+        failure (connection_errors), and the client backs off, or stops for
+        good, while Edge is healthy.
+      bye_ends_cleanly: >-
+        Edge always sends bye when it closes a connection itself. A
+        connection that ends after a bye ended cleanly: it is not a failure,
+        it resets the count of consecutive failures
+        (connection_errors.attempt_reset), and the client reconnects (with
+        its Last-Event-ID) after the first-attempt delay. A connection that
+        ends without a bye ended with an error, and is counted as a failure
+        (connection_errors.classification).
+      context_change: >-
+        The Last-Event-ID belongs to the API key and context it was received
+        for, as the ETag does when polling (featurehub_edge.polling.etag): a
+        connection opened for a new context, a server-evaluated key's in
+        particular, MUST NOT send the previous context's Last-Event-ID.
+        Otherwise Edge would answer that nothing is new, and the repository
+        would keep the old context's features (and, after a context change,
+        wait for a readiness that never comes).
     server_evaluated:
       support: >-
         OPTIONAL. An SDK MAY support server-evaluated keys (no '*') over
@@ -872,7 +977,8 @@ featurehub_edge:
       no_default_mode: >-
         A server-evaluated key has no default mode, in every SDK: the mode
         MUST be chosen. An SDK that reads its configuration from environment
-        variables (e.g. Go's FEATUREHUB_POLLING_PASSIVE) MAY take the mode
+        variables (FEATUREHUB_CONNECT_TYPE, or an SDK's legacy variables:
+        providers.environment_variables) MAY take the mode
         from them; if no mode is given explicitly or by them, it is a
         validation error (providers.validation_errors).
       sdk_status: >-
@@ -882,7 +988,8 @@ featurehub_edge:
     events:
       - "features / feature / delete_feature: as transport.relaying_featurehub_events"
       - "failure: notify(failure), close; no reconnect"
-      - "bye, or the stream dropping: notify(bye) (the provider stays ready; it is not reported as stale), and reconnect under the reconnect policy"
+      - "bye: notify(bye) (the provider stays ready; it is not reported as stale); the connection ends cleanly, and the client reconnects with its Last-Event-ID (last_event_id.bye_ends_cleanly)"
+      - "the stream dropping without a bye: notify(bye), and reconnect under the reconnect policy, counted as a failure (connection_errors)"
       - >-
         config with an edge.stale key: its presence alone means stale,
         whatever the value ({"edge.stale": true}, {"edge.stale": false},
@@ -951,11 +1058,15 @@ featurehub_edge:
       attempt_reset: >-
         The count of consecutive failures SHOULD reset only when the connection
         delivers a FeatureHub event showing it works: ack, features, feature,
-        delete_feature or config. Not merely when it opens (a 200), and not on
-        bye, error or failure: a server or proxy that accepts the connection
-        and drops it at once (or only says bye) must still back off and use
-        up the maximum attempts, rather than reconnect at the first-attempt
-        delay forever. The reset SHOULD happen before the end of that same
+        delete_feature, config or bye. A bye is included because Edge always
+        sends one when it closes a connection itself, including one that
+        delivered nothing else (last_event_id.no_new_updates): without it,
+        healthy quiet connections would use up the maximum attempts. Not
+        merely when the connection opens (a 200), and not on an error or
+        failure: a server or proxy that accepts the connection and drops it
+        without any of these events must still back off and use up the
+        maximum attempts, rather than reconnect at the first-attempt delay
+        forever. The reset SHOULD happen before the end of that same
         stream is counted as the next failure: an implementation whose SSE
         library reports the stream ending separately from (and possibly
         before) handing over the events before it SHOULD reset where the stream
@@ -1062,7 +1173,16 @@ conformance:
   - id: streaming-backoff
     check: "consecutive failed SSE connections wait increasingly longer, never longer than the configured maximum wait; changing the configured backoff and maximum changes the waits"
   - id: streaming-attempt-reset
-    check: "(SHOULD) with a maximum of 3 attempts, a server that accepts and drops every connection (no events, or only bye) stops the client after 3 attempts; one whose every third connection delivers an ack keeps it running"
+    check: "(SHOULD) with a maximum of 3 attempts, a server that accepts and drops every connection with no events stops the client after 3 attempts; one whose every third connection delivers an ack keeps it running, and so does one whose every connection only sends bye after a silence"
+  - id: streaming-last-event-id
+    check: >-
+      after features with id: fields, a reconnection sends the last id as
+      Last-Event-ID (a bye with no id: field does not change it); a server
+      that then sends nothing for a while and only bye, many times in a row,
+      leaves the repository's features and readiness unchanged, is never
+      counted as a failure and never stops the client; a stream silent for 5
+      minutes is not dropped by the default read timeout; a connection for a
+      new context sends no Last-Event-ID
   - id: streaming-minimum-delays
     check: "(SHOULD) a policy with nanosecond delays and full jitter, and a server retry: 1, still wait at least 100ms before each attempt; a retry: below 1000 is used as 1 second"
   - id: streaming-stops-for-good
@@ -1077,27 +1197,42 @@ conformance:
     check: "strategies whose attributes, percentageAttributes or values are null or absent decode, and evaluate as empty lists"
   - id: environment-mode-selection
     check: >-
-      with no mode in code: FEATUREHUB_POLLING_PASSIVE set gives passivePolling
-      (at FEATUREHUB_POLLING_INTERVAL, or 0 without it), for any key;
-      FEATUREHUB_POLLING_INTERVAL alone gives activePolling, for any key;
-      neither streams a client-evaluated key, and for a server-evaluated key
-      streams in an SDK that supports it or is a validation error in one that
-      does not; an empty variable counts as not set; a mode set in code wins
-      over the environment
+      in a server-side SDK, with no mode in code:
+      FEATUREHUB_CONNECT_TYPE=active gives activePolling and passive gives
+      passivePolling, each at the interval from code or
+      FEATUREHUB_CONNECT_INTERVAL, and either with no interval is a
+      validation error; streaming streams, ignoring
+      FEATUREHUB_CONNECT_INTERVAL (a validation error for a server-evaluated
+      key in an SDK without server-evaluated streaming); ACTIVE and
+      " passive " are accepted, and any other value is a validation error;
+      FEATUREHUB_CONNECT_INTERVAL alone gives activePolling; neither streams
+      a client-evaluated key, and for a server-evaluated key streams in an
+      SDK that supports it or is a validation error in one that does not; an
+      empty variable counts as not set; a mode set in code wins over the
+      environment; with a featuresUrl, streaming is a validation error and
+      no FEATUREHUB_CONNECT_TYPE means active
   - id: environment-durations
     check: >-
-      30s, 1m30s, 500ms and 0 are durations; 30, 1.5 and ten are not (a
-      validation error for FEATUREHUB_POLLING_INTERVAL), except that the
-      JavaScript SDK reads a FEATUREHUB_POLLING_INTERVAL of 5000 as 5s;
-      FEATUREHUB_POLLING_INTERVAL=3s or -30s is a validation error
+      30s, 1m30s, 500ms and 0 are durations for the other duration
+      variables; 30, 1.5 and ten are not
+  - id: environment-connect-interval
+    check: >-
+      FEATUREHUB_CONNECT_INTERVAL accepts 0, 0s, 5s, 30s, 5000ms, 1.5m and
+      1h; 30, 3s, 500ms, 1m30s, -30s, "30 s" and ten are validation errors,
+      in every server-side SDK
+  - id: environment-legacy-names
+    check: >-
+      an existing SDK reads its legacy mode and interval variables as before
+      only when neither FEATUREHUB_CONNECT_TYPE nor FEATUREHUB_CONNECT_INTERVAL
+      is set; with either set, the legacy ones are ignored
   - id: environment-names
-    check: "each name in providers.environment_variables.names is read, with that meaning, by every SDK that can read environment variables"
+    check: "each name in providers.environment_variables.names is read, with that meaning, by every server-side SDK; no client-side SDK reads them"
   - id: connection-default-mode
     check: "a FeatureHubConnection with a featuresUrl and no mode polls actively; with a host and a client-evaluated key it streams; with a server-evaluated key and no mode (none from environment variables either) it is a validation error"
   - id: server-evaluated-streaming
     check: "a server-evaluated key with streaming, in an SDK that supports it, sends the context on every connection and reconnection; in one that does not, it is rejected at configuration and no stream is opened; with activePolling or passivePolling it polls, sending x-featurehub"
-  - id: sdk-identification
-    check: "every request to Edge - each activePolling and passivePolling poll, and each streaming connection and reconnection, in browsers too - carries exactly one non-empty sdk query parameter (the SDK's name) and one version query parameter (the SDK's version), query-component-encoded, and extra headers or configuration cannot replace them"
+  - id: sdk-version
+    check: "every request to Edge - each activePolling and passivePolling poll, and each streaming connection and reconnection, in browsers too - carries exactly one sdk_version query parameter, 2 (spec.sdk_version) for this specification, and no parameter naming the SDK, its language or its release; extra headers or configuration cannot replace it"
   - id: passive
     check: "refreshIfStale fetches only after the interval; no requests of its own otherwise"
   - id: custom-transport
