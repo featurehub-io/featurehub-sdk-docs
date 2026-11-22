@@ -33,15 +33,17 @@
 spec:
   name: featurehub-protocol
   version: 1.1.1
+  sdk_version: 2
   status: implemented-in-dart
   changelog:
     - version: 1.1.1
       changes:
+        - "featurehub_edge.streaming.last_event_id: SSE clients keep the last event id and send it as Last-Event-ID on reconnection (not for a new context). Edge then sends no features if nothing is new: it holds the connection (typically 60 seconds, up to 3 to 5 minutes), possibly silent, then sends bye and closes, so several reconnections may bring no updates. A bye ends a connection cleanly and resets the failure count (attempt_reset); read timeouts SHOULD exceed 5 minutes"
         - "providers.environment_variables: FEATUREHUB_CONNECT_TYPE (active, passive or streaming) and FEATUREHUB_CONNECT_INTERVAL replace FEATUREHUB_POLLING_INTERVAL and FEATUREHUB_POLLING_PASSIVE, and give the default mode and interval (mode_selection). Active and passive both need an interval, in code or from FEATUREHUB_CONNECT_INTERVAL (passive no longer defaults to 0); streaming does not use it"
         - "providers.environment_variables.durations.connect_interval: FEATUREHUB_CONNECT_INTERVAL is a single number followed by a time unit (ms, s, m, h), and is 0 (connect once and stop) or at least 5 seconds"
         - "providers.environment_variables.applies_to: environment variables apply only to server-side SDKs (Go, Python, Ruby, Dart's featurehub-openfeatures-server); client-side SDKs do not read them"
         - "providers.environment_variables.legacy_names: existing SDKs keep their legacy variables as they read them today, used only when neither new variable is set; the JavaScript millisecond exception now applies only to its legacy FEATUREHUB_POLLING_INTERVAL"
-        - "featurehub_edge.sdk_version replaces featurehub_edge.sdk_identification: the sdk and version query parameters are dropped, and polling (activePolling and passivePolling) and streaming MUST send sdk_version, the major version of this specification the SDK complies with (1). Every SDK that adheres to the same major version sends the same URL, so a CDN in front of Edge is not fragmented by SDK, language or release"
+        - "featurehub_edge.sdk_version replaces featurehub_edge.sdk_identification: the sdk and version query parameters are dropped, and polling (activePolling and passivePolling) and streaming MUST send sdk_version=2 (spec.sdk_version, the protocol generation this specification defines; it changes only when the wire protocol to Edge changes, not with minor or patch releases of this specification). Every SDK that adheres to this specification sends the same URL, so a CDN in front of Edge is not fragmented by SDK, language or release"
     - version: 1.1.0
       changes:
         - "featurehub_edge.sdk_identification: polling (activePolling and passivePolling) and streaming MUST send sdk (the SDK's name/language) and version (the SDK's version) query parameters on every request to Edge"
@@ -588,7 +590,7 @@ providers:
         FEATUREHUB_POLLING_REQ_TIMEOUT: "duration: how long a polling request may take before it is abandoned (requestTimeout)"
       streaming:
         FEATUREHUB_SSE_CONNECT_TIMEOUT: "duration: how long opening the stream may take before the attempt fails (connectTimeout)"
-        FEATUREHUB_SSE_READ_TIMEOUT: "duration: how long an open stream may go without data before it is treated as dropped and reconnected"
+        FEATUREHUB_SSE_READ_TIMEOUT: "duration: how long an open stream may go without data before it is treated as dropped and reconnected; more than 5 minutes, as Edge may send nothing for that long (featurehub_edge.streaming.last_event_id.quiet_connections)"
         FEATUREHUB_SSE_INITIAL_RETRY_DELAY: "duration: the wait before the first reconnection attempt after a failure (the backoff's base delay: featurehub_edge.streaming.connection_errors.backoff)"
         FEATUREHUB_SSE_MAX_RETRY_DELAY: "duration: the longest wait between reconnection attempts (the backoff's maximum)"
         FEATUREHUB_SSE_BACKOFF_MULTIPLIER: "number, at least 1: how much the wait grows after each consecutive failure"
@@ -727,21 +729,27 @@ featurehub_edge:
       reconnection (browsers included, as it is a query parameter, not a
       header).
     value: >-
-      The major version of this specification (spec.version) that the SDK
-      complies with, as a decimal integer with no leading zeros: an SDK
-      that complies with featurehub-protocol 1.x sends sdk_version=1. It
-      does not name the SDK, its language or its own release version, and
-      it is fixed by the SDK: the application MUST NOT be able to change it.
-      An SDK MUST NOT claim a major version it does not fully comply with.
+      The protocol generation this specification defines (spec.sdk_version),
+      as a decimal integer with no leading zeros: an SDK that complies with
+      this specification sends sdk_version=2. It is deliberately not
+      spec.version, nor its major part: minor and patch releases of this
+      specification change behaviour (scheduling, readiness, environment
+      variables, validation) without changing what goes over the wire, and
+      would split the cache for nothing. sdk_version changes only when the
+      wire protocol to Edge changes (the requests an SDK sends, or the
+      responses it relies on), whatever spec.version does. It does not name the SDK, its language or its own release
+      version, and it is fixed by the SDK: the application MUST NOT be able
+      to change it. An SDK MUST NOT send an sdk_version whose wire protocol
+      it does not fully implement.
     why_not_per_sdk: >-
       It deliberately says nothing about which SDK is calling. A CDN (or any
       cache) in front of Edge keys on the whole URL, query string included,
       so a parameter naming each SDK and its release would split the cache
       into one copy per SDK, language and release, all holding the same
-      features. Every SDK that adheres to the same major version of this
-      specification behaves the same way on the wire, so they send the same
+      features. Every SDK that speaks the same wire protocol sends the same
+      requests, whichever release of this specification it follows, so they send the same
       sdk_version and share one cache entry; the cache splits only when the
-      protocol itself changes incompatibly (a new major version), which is
+      protocol itself changes incompatibly (a new sdk_version), which is
       when a separate entry is wanted. For the same reason an SDK MUST NOT
       add query parameters of its own that identify it.
     encoding: "sent exactly once; a decimal integer, so it needs no encoding"
@@ -752,12 +760,12 @@ featurehub_edge:
     edge_behaviour: >-
       Edge does not require it and MUST NOT reject a request without it
       (older SDKs do not send it); it does not affect which features are
-      returned. Edge MAY use it to answer each major version of the
-      protocol as that version requires.
+      returned. Edge MAY use it to answer each sdk_version as its
+      specification requires.
     custom_transports: >-
       Not required of a custom transport (transport), which may not talk to
-      Edge at all; one that does SHOULD send it, with the major version it
-      complies with.
+      Edge at all; one that does SHOULD send it, with the sdk_version whose
+      specification it complies with.
   polling:
     edge_api:
       description: >-
@@ -828,8 +836,7 @@ featurehub_edge:
         - "FeatureEnvironmentCollection.features: the definition does not make it nullable; decoders accept null as none (body)"
     request: >-
       GET <host>/features?apiKey=<key>[&apiKey=<key>...]&contextSha=<sha256
-      of the x-featurehub header, or 0>&sdk_version=<the major version of
-      this specification>; with the x-featurehub header for a
+      of the x-featurehub header, or 0>&sdk_version=2 (spec.sdk_version); with the x-featurehub header for a
       server-evaluated key, and the extra headers (extra_headers).
       sdk_version is required of every poll, active and passive
       (sdk_version). This is
@@ -901,14 +908,59 @@ featurehub_edge:
       snapshot_client: "not applied: the snapshot client (your own server; feature-snapshot-protocol.yaml) polls at its configured interval and uses ETags instead"
   streaming:
     request: >-
-      An SSE stream from <host>/features/<key>?sdk_version=<the major
-      version of this specification> (required on every connection and
+      An SSE stream from <host>/features/<key>?sdk_version=2
+      (spec.sdk_version; required on every connection and
       reconnection: sdk_version); for a server-evaluated key
       (in an SDK that supports it: server_evaluated), sending the
       x-featurehub header (dart:io) or the xfeaturehub query parameter
       (browsers, whose EventSource cannot send headers); and, except in
       browsers, the extra headers (extra_headers) on every connection and
-      reconnection.
+      reconnection; and, on a reconnection, Last-Event-ID (last_event_id).
+    last_event_id:
+      rule: >-
+        Edge's events carry an SSE id: field. An SSE client MUST keep the id
+        of the last event it received (as the SSE standard's last event ID:
+        an event with no id: field, such as Edge's bye, leaves it as it was)
+        and MUST send it as the Last-Event-ID header on every reconnection.
+        A browser's EventSource does this itself on the reconnections it
+        makes; a new EventSource starts without one, and gets the full
+        features.
+      no_new_updates: >-
+        With a Last-Event-ID that is current, Edge does not send the features
+        again. It holds the connection open for a period (typically 60
+        seconds, but it can be 3 to 5 minutes) during which it may send
+        nothing at all, then sends bye (with no id: field) and closes the
+        connection; or the connection ends with an error, because of a
+        network issue. An SDK MUST expect this: a connection, and several
+        reconnections in a row, may deliver no updates at all before the
+        next change arrives. It is normal, not a failure, not a lost
+        connection and not stale: the repository keeps its features, and
+        its readiness does not change (Ready stays Ready).
+      quiet_connections: >-
+        Because Edge may send nothing for up to 5 minutes before its bye, an
+        SDK MUST NOT treat a stream that is silent for less than that as
+        dropped. A read timeout (FEATUREHUB_SSE_READ_TIMEOUT, or the SDK's
+        own setting), where an SDK has one, SHOULD default to more than 5
+        minutes, and an SDK SHOULD warn when one is configured below it:
+        otherwise every quiet connection ends as a timeout, counted as a
+        failure (connection_errors), and the client backs off, or stops for
+        good, while Edge is healthy.
+      bye_ends_cleanly: >-
+        Edge always sends bye when it closes a connection itself. A
+        connection that ends after a bye ended cleanly: it is not a failure,
+        it resets the count of consecutive failures
+        (connection_errors.attempt_reset), and the client reconnects (with
+        its Last-Event-ID) after the first-attempt delay. A connection that
+        ends without a bye ended with an error, and is counted as a failure
+        (connection_errors.classification).
+      context_change: >-
+        The Last-Event-ID belongs to the API key and context it was received
+        for, as the ETag does when polling (featurehub_edge.polling.etag): a
+        connection opened for a new context, a server-evaluated key's in
+        particular, MUST NOT send the previous context's Last-Event-ID.
+        Otherwise Edge would answer that nothing is new, and the repository
+        would keep the old context's features (and, after a context change,
+        wait for a readiness that never comes).
     server_evaluated:
       support: >-
         OPTIONAL. An SDK MAY support server-evaluated keys (no '*') over
@@ -936,7 +988,8 @@ featurehub_edge:
     events:
       - "features / feature / delete_feature: as transport.relaying_featurehub_events"
       - "failure: notify(failure), close; no reconnect"
-      - "bye, or the stream dropping: notify(bye) (the provider stays ready; it is not reported as stale), and reconnect under the reconnect policy"
+      - "bye: notify(bye) (the provider stays ready; it is not reported as stale); the connection ends cleanly, and the client reconnects with its Last-Event-ID (last_event_id.bye_ends_cleanly)"
+      - "the stream dropping without a bye: notify(bye), and reconnect under the reconnect policy, counted as a failure (connection_errors)"
       - >-
         config with an edge.stale key: its presence alone means stale,
         whatever the value ({"edge.stale": true}, {"edge.stale": false},
@@ -1005,11 +1058,15 @@ featurehub_edge:
       attempt_reset: >-
         The count of consecutive failures SHOULD reset only when the connection
         delivers a FeatureHub event showing it works: ack, features, feature,
-        delete_feature or config. Not merely when it opens (a 200), and not on
-        bye, error or failure: a server or proxy that accepts the connection
-        and drops it at once (or only says bye) must still back off and use
-        up the maximum attempts, rather than reconnect at the first-attempt
-        delay forever. The reset SHOULD happen before the end of that same
+        delete_feature, config or bye. A bye is included because Edge always
+        sends one when it closes a connection itself, including one that
+        delivered nothing else (last_event_id.no_new_updates): without it,
+        healthy quiet connections would use up the maximum attempts. Not
+        merely when the connection opens (a 200), and not on an error or
+        failure: a server or proxy that accepts the connection and drops it
+        without any of these events must still back off and use up the
+        maximum attempts, rather than reconnect at the first-attempt delay
+        forever. The reset SHOULD happen before the end of that same
         stream is counted as the next failure: an implementation whose SSE
         library reports the stream ending separately from (and possibly
         before) handing over the events before it SHOULD reset where the stream
@@ -1116,7 +1173,16 @@ conformance:
   - id: streaming-backoff
     check: "consecutive failed SSE connections wait increasingly longer, never longer than the configured maximum wait; changing the configured backoff and maximum changes the waits"
   - id: streaming-attempt-reset
-    check: "(SHOULD) with a maximum of 3 attempts, a server that accepts and drops every connection (no events, or only bye) stops the client after 3 attempts; one whose every third connection delivers an ack keeps it running"
+    check: "(SHOULD) with a maximum of 3 attempts, a server that accepts and drops every connection with no events stops the client after 3 attempts; one whose every third connection delivers an ack keeps it running, and so does one whose every connection only sends bye after a silence"
+  - id: streaming-last-event-id
+    check: >-
+      after features with id: fields, a reconnection sends the last id as
+      Last-Event-ID (a bye with no id: field does not change it); a server
+      that then sends nothing for a while and only bye, many times in a row,
+      leaves the repository's features and readiness unchanged, is never
+      counted as a failure and never stops the client; a stream silent for 5
+      minutes is not dropped by the default read timeout; a connection for a
+      new context sends no Last-Event-ID
   - id: streaming-minimum-delays
     check: "(SHOULD) a policy with nanosecond delays and full jitter, and a server retry: 1, still wait at least 100ms before each attempt; a retry: below 1000 is used as 1 second"
   - id: streaming-stops-for-good
@@ -1166,7 +1232,7 @@ conformance:
   - id: server-evaluated-streaming
     check: "a server-evaluated key with streaming, in an SDK that supports it, sends the context on every connection and reconnection; in one that does not, it is rejected at configuration and no stream is opened; with activePolling or passivePolling it polls, sending x-featurehub"
   - id: sdk-version
-    check: "every request to Edge - each activePolling and passivePolling poll, and each streaming connection and reconnection, in browsers too - carries exactly one sdk_version query parameter, the major version of this specification (1 for 1.x), and no parameter naming the SDK, its language or its release; extra headers or configuration cannot replace it"
+    check: "every request to Edge - each activePolling and passivePolling poll, and each streaming connection and reconnection, in browsers too - carries exactly one sdk_version query parameter, 2 (spec.sdk_version) for this specification, and no parameter naming the SDK, its language or its release; extra headers or configuration cannot replace it"
   - id: passive
     check: "refreshIfStale fetches only after the interval; no requests of its own otherwise"
   - id: custom-transport
