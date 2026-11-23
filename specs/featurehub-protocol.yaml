@@ -50,6 +50,7 @@ spec:
         - "providers.environment_variables.durations: every duration variable uses one strict grammar (a single number and a lowercase unit, ms, s, m or h, or 0), not Go's time.ParseDuration; compound values such as 1m30s are not accepted"
         - "providers.environment_variables.legacy_names: only new SDKs (Dart and Go) implement this specification, and they read none of the legacy names"
         - "encoding.rollout_strategy.well_known_field_names.fhubWhenActive: a strategy attribute holding a UTC ISO-8601 date-time, matched when the SDK's clock is at or after it (rollout-strategies.yaml algorithm.well_known_attributes.fhubWhenActive); encoding.evaluation_context drops a context key of that name, so the application can never supply it"
+        - "encoding.evaluation_context.context_sha: contextSha is defined once, with test vectors: the SHA-256 of the x-featurehub header as 64 lowercase hex characters, or 0 when there is no header (an empty header included). x_featurehub_header gains not_form_encoding, sorting and why_canonical: every SDK MUST build the same header, as the header's hash is a cache key; form encoders (space as +) and locale-aware sorting do not comply"
         - "providers.default_mode replaces featurehub_edge.streaming.server_evaluated.no_default_mode: the default depends on the provider, not the key. A client-side provider polls actively at its default interval; a server-side provider streams (or polls actively with an interval), a server-evaluated key included where the SDK supports server-evaluated streaming"
     - version: 1.1.0
       changes:
@@ -263,11 +264,55 @@ encoding:
         encodeURIComponent does: UTF-8, then every byte except A-Z a-z 0-9
         - _ . ! ~ * ' ( ) as %XX (uppercase hex). So a "," or "=" in a key or
         a value can never be confused with the separators.
+      not_form_encoding: >-
+        This is not HTML form encoding: a space is %20, never "+", and the
+        hex digits are uppercase. Most languages' form encoders differ from
+        it and MUST NOT be used as they are: Java's URLEncoder and .NET's
+        HttpUtility.UrlEncode write a space as "+" (and .NET writes
+        lowercase hex), Ruby's URI.encode_www_form_component writes "+",
+        and each leaves a different set of punctuation unencoded. .NET's
+        Uri.EscapeDataString is RFC 3986: it matches once ! * ' ( ) are
+        left unencoded. FeatureHub Edge decodes keys and values with a form
+        decoder, which reads this encoding correctly.
+      sorting: >-
+        The encoded strings are sorted, not the raw keys, by ordinal
+        comparison (they are ASCII, so code unit and byte order agree). A
+        locale-aware comparison (.NET's default OrderBy, for example) MUST
+        NOT be used.
+      why_canonical: >-
+        The header is hashed into contextSha (context_sha), which a cache in
+        front of Edge keys on. Every SDK MUST build exactly the same header
+        for the same attributes, or the same context is a different cache
+        entry in each SDK.
       example: "country=nz,userkey=fred"
       examples:
         - {attributes: {userkey: [fred], country: [nz]}, header: "country=nz,userkey=fred"}
         - {attributes: {shop: ["a&b", "c d"]}, header: "shop=a%26b%2Cc%20d"}
         - {attributes: {"my key": [x], "a,b=c": [y]}, header: "a%2Cb%3Dc=y,my%20key=x"}
+    context_sha:
+      description: >-
+        The contextSha query parameter sent to FeatureHub Edge, polling and
+        streaming alike (featurehub_edge.query_parameters.context_sha). Edge
+        does not use it: it keeps a cache in front of Edge from serving one
+        context's features for another, as the x-featurehub header is not
+        part of a cache key.
+      algorithm:
+        - build the x-featurehub header (x_featurehub_header) from the current context's attributes
+        - "no header (a client-evaluated key, or no attributes left after the null and empty ones are dropped): contextSha is the single character 0"
+        - "otherwise: SHA-256 of the header's UTF-8 bytes, as 64 lowercase hex characters (not base64, not uppercase)"
+      empty_header: >-
+        An empty header is no header: its contextSha is 0, never the
+        SHA-256 of the empty string.
+      examples:
+        - {attributes: {}, header: null, contextSha: "0"}
+        - {attributes: {userkey: [fred], country: [nz]}, header: "country=nz,userkey=fred", contextSha: bbaf44b81bc349603f38ece814e9b741fea50e58990db3bd24988ee69eec0603}
+        - {attributes: {shop: ["a&b", "c d"]}, header: "shop=a%26b%2Cc%20d", contextSha: 5f2930219932130037f572be9de4ae5cea89983dba663d9400437a63c1dea22c}
+        - {attributes: {"my key": [x], "a,b=c": [y]}, header: "a%2Cb%3Dc=y,my%20key=x", contextSha: a9d1b1707b4d38824da99d1daf06a1b9b24f7d1397d0e138153a946f1575d40a}
+        - {attributes: {name: ["Mary Jane+O'Neil ~*()!"]}, header: "name=Mary%20Jane%2BO'Neil%20~*()!", contextSha: ff5b8c6d2cc3bbebfc3285b9106b3b300082ecfc5db6d1e4e37e685d0dbbe653}
+        - {attributes: {city: ["Zürich"], greeting: ["สวัสดี"]}, header: "city=Z%C3%BCrich,greeting=%E0%B8%AA%E0%B8%A7%E0%B8%B1%E0%B8%AA%E0%B8%94%E0%B8%B5", contextSha: d0f83f10b3e4f06cc9e3d57736c75f91dce1f16ed6035f0b430ccd7f37a50dce}
+        - {attributes: {"a!": ["1"], "a ": ["2"]}, header: "a!=1,a%20=2", contextSha: 16cab394e891c04ba620debb77279050b6a88e4b58da3bffeb286c4428289e72}
+        - {attributes: {userkey: [fred], empty: [], gone: [null]}, header: "userkey=fred", contextSha: 6a1d1fa42d1c1917552a255a940792205cb62cc2efd6613ab5a3f75d0038518b}
+        - {attributes: {version: [3.0], beta: [true], ratio: [0.5]}, header: "beta=true,ratio=0.5,version=3", contextSha: b8ec246368e079b0f2b84682231065d867c943e964b5d5acfb557c86cb45b0fb}
 
 # ---------------------------------------------------------------------------
 # 2. Polling / passive scheduling (shared by FeatureHub polling and snapshots)
@@ -857,9 +902,11 @@ featurehub_edge:
     polling: "<host>/features?apiKey=<key>[&apiKey=<key>...]&contextSha=<sha>&sdk_version=2"
     streaming: "<host>/features/<key>?contextSha=<sha>&sdk_version=2[&xfeaturehub=<context>]"
     context_sha: >-
-      contextSha is the same value in both: the sha256 of the x-featurehub
-      header (encoding.evaluation_context.x_featurehub_header), or 0 when there is none (a
-      client-evaluated key, or no attributes). For streaming it keeps a CDN
+      contextSha is the same value in both, computed as
+      encoding.evaluation_context.context_sha: the SHA-256, as 64
+      lowercase hex characters, of the x-featurehub header
+      (encoding.evaluation_context.x_featurehub_header), or 0 when there is
+      none (a client-evaluated key, or no attributes). For streaming it keeps a CDN
       from serving one context's stream for another, as the x-featurehub
       header is not part of a cache key.
     host_query: >-
@@ -1337,6 +1384,8 @@ conformance:
       decoding or configuration
   - id: x-featurehub-encoding
     check: "encoding.evaluation_context.x_featurehub_header.examples all reproduce: keys and values are both encoded, then the encoded strings sorted"
+  - id: context-sha
+    check: "encoding.evaluation_context.context_sha.examples all reproduce, header and contextSha alike; a client-evaluated key, or a context with no attributes, sends contextSha=0, polling and streaming"
   - id: edge-stale
     check: "a 236 (polling) or edge.stale (streaming) after features: the repository's readiness is Stale, environmentStale is true, nothing more is requested, the provider reports STALE once. Any edge.stale value counts, false and null included"
   - id: bye-not-stale
