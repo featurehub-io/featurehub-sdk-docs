@@ -49,8 +49,10 @@ spec:
         - "featurehub_edge.streaming.last_event_id.short_connections: a connection that opens and ends less than 10 seconds after its request, with a bye or without, is a failure (a cache in front of Edge replaying a closed stream), and nothing it delivers resets the failure count; consecutive ones SHOULD be logged as a likely cache misconfiguration"
         - "providers.environment_variables.durations: every duration variable uses one strict grammar (a single number and a lowercase unit, ms, s, m or h, or 0), not Go's time.ParseDuration; compound values such as 1m30s are not accepted"
         - "providers.environment_variables.legacy_names: only new SDKs (Dart and Go) implement this specification, and they read none of the legacy names"
-        - "encoding.rollout_strategy.well_known_field_names.fhubWhenActive: a strategy attribute holding a UTC ISO-8601 date-time, matched when the SDK's clock is at or after it (rollout-strategies.yaml algorithm.well_known_attributes.fhubWhenActive); encoding.evaluation_context drops a context key of that name, so the application can never supply it"
+        - "encoding.rollout_strategy.well_known_field_names.fhubWhenActive: a strategy attribute holding a UTC ISO-8601 date-time, compared with the SDK's clock using the attribute's conditional (EQUALS, NOT_EQUALS, GREATER, GREATER_EQUALS, LESS, LESS_EQUALS; any other never matches), its type ignored (rollout-strategies.yaml algorithm.well_known_attributes.fhubWhenActive); encoding.evaluation_context drops a context key of that name, so the application can never supply it"
         - "encoding.evaluation_context.context_sha: contextSha is defined once, with test vectors: the SHA-256 of the x-featurehub header as 64 lowercase hex characters, or 0 when there is no header (an empty header included). x_featurehub_header gains not_form_encoding, sorting and why_canonical: every SDK MUST build the same header, as the header's hash is a cache key; form encoders (space as +) and locale-aware sorting do not comply"
+        - "repository.notifications.features: readiness is broadcast only when it changes (the initial Ready, and Stale -> Ready), not on every full set; repository.notifications.feature_changes: changed features have their own event, separate from readiness"
+        - "rollout-strategies.yaml fhubWhenActive uses the attribute's conditional (EQUALS, NOT_EQUALS, GREATER, GREATER_EQUALS, LESS, LESS_EQUALS; any other never matches) and ignores its type"
         - "providers.default_mode replaces featurehub_edge.streaming.server_evaluated.no_default_mode: the default depends on the provider, not the key. A client-side provider polls actively at its default interval; a server-side provider streams (or polls actively with an interval), a server-evaluated key included where the SDK supports server-evaluated streaming"
     - version: 1.1.0
       changes:
@@ -148,14 +150,18 @@ encoding:
         not read from the evaluation context.
       fhubWhenActive: >-
         Its values hold one ISO-8601 date-time, always UTC (e.g.
-        "2026-12-01T09:00:00Z"). It matches when the current time of the
-        machine the SDK runs on is equal to or after it, and not before, so a
-        strategy can activate a feature at or after a given moment. The time
-        always comes from the clock, never from the context (the
-        application cannot supply it: evaluation_context drops a context key
-        of that name). The name is case-insensitive; the attribute's
-        conditional and type are ignored. It combines freely with every other
-        rule a strategy can hold (other attributes, a percentage,
+        "2026-12-01T09:00:00Z"). The current time of the machine the SDK runs
+        on is compared against it with the attribute's conditional: EQUALS,
+        NOT_EQUALS, GREATER, GREATER_EQUALS, LESS or LESS_EQUALS, the clock on
+        the left (GREATER_EQUALS, the usual case, matches at or after the
+        time, so a strategy can activate a feature at a given moment; LESS
+        matches until it). Any other conditional (INCLUDES, EXCLUDES,
+        STARTS_WITH, ENDS_WITH, REGEX) never matches. The attribute's type is
+        ignored: the value is always a date-time string. The time always
+        comes from the clock, never from the context (the application cannot
+        supply it: evaluation_context drops a context key of that name). The
+        name is case-insensitive. It combines freely with every other rule a
+        strategy can hold (other attributes, a percentage,
         percentageAttributes), ANDed with them, for example to change a
         percentage, or roll out to specific countries, at a given time;
         nothing may prevent such a combination. Evaluation is in rollout-strategies.yaml
@@ -434,8 +440,17 @@ repository:
       semantics:
         - apply each feature with the update rule below
         - remove every held feature whose key is not in the set (keys only asked for by code, with no feature, are kept)
-        - readiness becomes Ready (from NotReady or Stale) and is broadcast (every time, so waiters for "the next ready" wake up), unless the connection has failed or the environment is stale, when it stays Stale
+        - readiness becomes Ready (from NotReady or Stale), unless the connection has failed or the environment is stale, when it stays Stale
+        - "readiness is broadcast only when it changes: the initial Ready (the first full set), and Stale -> Ready (the features of a context change arriving, which waiters for the next ready wake up for). A full set that leaves readiness as it was (Ready stays Ready, as on every poll) broadcasts nothing: readiness is not a change notification (feature_changes)"
         - recompute the SHA
+    feature_changes: >-
+      Changed features are told to listeners by their own event, never by
+      readiness: a listener on a feature is called when that feature's value
+      (or lock) changes, whether from a full set, a single feature, a delete,
+      or a context change; and the repository tells its listeners when a
+      full set after the first, or a single feature, changed anything. A
+      provider's CONFIGURATION_CHANGED (providers.events) comes from these,
+      not from readiness.
     feature:
       payload: one feature_state
       semantics: apply with the update rule; recompute the SHA if applied
@@ -1370,9 +1385,11 @@ conformance:
     check: "a context change takes readiness Ready -> Stale and, when the new context's features arrive, Stale -> Ready; the provider reports RECONCILING then CONTEXT_CHANGED, never STALE"
   - id: when-active
     check: >-
-      a strategy whose only attribute is fhubWhenActive with a time T (and
-      a clock the test controls) does not match before T and matches at T and
-      after, with no new features delivered in between; a context with
+      a strategy whose only attribute is fhubWhenActive GREATER_EQUALS a time
+      T (and a clock the test controls) does not match before T and matches
+      at T and after, with no new features delivered in between; with LESS
+      it matches before T and not from T; with INCLUDES or EXCLUDES it never
+      matches; a type other than DATETIME changes nothing; a context with
       fhubWhenActive set (to a time before T) changes nothing, and the key is
       not in the x-featurehub header or the query parameters sent
   - id: when-active-combined
@@ -1424,6 +1441,8 @@ conformance:
     check: "the event source stopping for good (a 4xx, an unretried status, no attempts left) notifies failure, never bye"
   - id: permanent-failure
     check: "a permanent failure before features raises connection_failed, sets readiness Failed and fails initialisation (PROVIDER_FATAL); after them it raises connection_failed, readiness goes from Ready to Stale, the provider reports STALE once and keeps resolving"
+  - id: readiness-broadcast
+    check: "the first full set broadcasts Ready once; later full sets that leave readiness Ready broadcast nothing, while a changed feature in one still calls that feature's listeners; after a context change, the new context's full set broadcasts Ready (Stale -> Ready)"
   - id: readiness-transitions
     check: "readiness never goes Ready -> NotReady (clearing goes Ready -> Stale -> NotReady), never NotReady -> Stale, and never to Failed once a full set has been received; Failed is final; a full set takes Stale -> Ready, except after connection_failed or environment_stale, when it is applied and readiness stays Stale"
   - id: edge-stale-config-ignored

@@ -34,7 +34,7 @@ spec:
   changelog:
     - version: 1.2.0
       changes:
-        - "well_known_attributes.fhubWhenActive: a strategy attribute named fhubWhenActive holds a UTC ISO-8601 date-time and matches when the clock of the machine the SDK runs on is at or after it; it is never taken from the context, so a strategy can switch a feature on at a given moment"
+        - "well_known_attributes.fhubWhenActive: a strategy attribute named fhubWhenActive holds a UTC ISO-8601 date-time and compares the clock of the machine the SDK runs on against it, using the attribute's conditional (EQUALS, NOT_EQUALS, GREATER, GREATER_EQUALS, LESS, LESS_EQUALS; any other conditional never matches) and ignoring its type; it is never taken from the context, so a strategy can switch a feature on (GREATER_EQUALS) or off (LESS) at a given moment"
     - version: 1.1.0
       changes:
         - "js_conversions.strict_number: NUMBER attributes no longer use JavaScript's parseInt / parseFloat; a supplied value that is not a strict decimal number never matches, and values that are not numbers are ignored"
@@ -149,9 +149,10 @@ algorithm:
   well_known_attributes:
     fhubWhenActive:
       purpose: >-
-        Lets whoever creates a feature's strategy make it activate (turn a
-        feature on, say) at or after a given date and time, with no help from
-        the application.
+        Lets whoever creates a feature's strategy make it apply from a given
+        date and time (GREATER_EQUALS, the usual case: turn a feature on at a
+        moment), or until one (LESS: turn it off at a moment), with no help
+        from the application.
       recognised: >-
         A strategy attribute whose fieldName is fhubWhenActive, compared
         case-insensitively (fhubwhenactive is the same name). It is set by
@@ -162,14 +163,28 @@ algorithm:
         Implementations SHOULD also accept a date-time with an explicit
         offset, converting it to UTC.
       rule: >-
-        The attribute matches if the current time of the machine the SDK is
-        running on (UTC) is equal to or after that date-time, and does not
-        match before it. The comparison is on instants, to the precision of
-        the value (milliseconds, where it has them), not on strings.
-      ignored: >-
-        The attribute's conditional and type are ignored, whatever they say
-        (FeatureHub sends DATETIME / GREATER_EQUALS, but evaluation MUST NOT
-        depend on them).
+        The attribute compares the current time of the machine the SDK is
+        running on (UTC), `now`, against that date-time with the attribute's
+        conditional, `now` on the left: GREATER_EQUALS matches when now is
+        equal to or after the value (and not before it), LESS when now is
+        before it, and so on. The comparison is on instants, to the precision
+        of the value (milliseconds, where it has them), not on strings, and
+        not at the seconds precision of the DATETIME matcher (matchers.DATETIME).
+      conditionals:
+        EQUALS: now is the same instant as any value
+        NOT_EQUALS: now is the same instant as no value
+        GREATER: now is after any value
+        GREATER_EQUALS: now is at or after any value
+        LESS: now is before any value
+        LESS_EQUALS: now is at or before any value
+        others: >-
+          INCLUDES, EXCLUDES, STARTS_WITH, ENDS_WITH and REGEX mean nothing for
+          a moment in time: the attribute never matches, so the strategy never
+          applies (a mis-set conditional can never switch a feature on early).
+          Implementations MUST NOT throw.
+      type_ignored: >-
+        The attribute's type is ignored, whatever it says: the value is always
+        read as an ISO-8601 date-time string (FeatureHub sends DATETIME).
       never_from_context: >-
         The time is never taken from the evaluation context: a context
         attribute named fhubWhenActive (in any case), or `now`, has no effect
@@ -178,13 +193,16 @@ algorithm:
         encoding.evaluation_context drops such a context key).
       several_values: >-
         FeatureHub sends exactly one value. If there are several, the
-        attribute matches if the clock is at or after ANY of them (that is,
-        the earliest), as other attributes match on any value; null values
-        are dropped first.
+        conditional applies to each as `conditionals` says: ANY of them for
+        all but NOT_EQUALS, which matches only if now is none of them (so with
+        GREATER_EQUALS the earliest decides, with LESS the latest). Null
+        values, and values that are not valid ISO-8601 date-times, are dropped
+        first.
       no_match: >-
-        No values (null, absent or empty), or a value that is not a valid
-        ISO-8601 date-time: the attribute does not match, so the strategy
-        does not activate. Implementations MUST NOT throw.
+        No values (null, absent or empty), or none that is a valid ISO-8601
+        date-time: the attribute does not match, whatever the conditional
+        (NOT_EQUALS included), so the strategy does not apply.
+        Implementations MUST NOT throw.
       combines: >-
         It can be combined with anything a strategy can hold, and nothing
         may prevent that: other attributes (of any type or name), a
@@ -197,7 +215,8 @@ algorithm:
         its own percentage and does not stack). An implementation MUST NOT
         reject, skip or treat specially a strategy because it combines
         fhubWhenActive with other rules. A strategy with only fhubWhenActive
-        matches everyone once the time is reached.
+        matches everyone while its comparison holds (with GREATER_EQUALS, once
+        the time is reached).
       combinations:   # examples of what combining allows
         - "a percentage change at a time: a 10% strategy, and before it a 50% strategy with fhubWhenActive 2026-12-01T09:00:00Z; from then on 50% get the value"
         - "a country rollout at a time: country EQUALS [nz, au] AND fhubWhenActive 2026-12-01T09:00:00Z; only those countries get it, and only from then"
@@ -215,7 +234,17 @@ algorithm:
       - {attribute: {fieldName: fhubWhenActive, type: DATETIME, conditional: GREATER_EQUALS, values: ["2026-12-01T09:00:00Z"]}, clock: "2026-12-01T08:59:59.999Z", result: false}
       - {attribute: {fieldName: fhubWhenActive, type: DATETIME, conditional: GREATER_EQUALS, values: ["2026-12-01T09:00:00Z"]}, clock: "2026-12-01T09:00:00.000Z", result: true, shows: "at the time is a match"}
       - {attribute: {fieldName: fhubWhenActive, type: DATETIME, conditional: GREATER_EQUALS, values: ["2026-12-01T09:00:00Z"]}, clock: "2027-01-01T00:00:00Z", result: true}
-      - {attribute: {fieldName: fhubWhenActive, type: STRING, conditional: EQUALS, values: ["2026-12-01T09:00:00Z"]}, clock: "2026-12-02T00:00:00Z", result: true, shows: "type and conditional ignored"}
+      - {attribute: {fieldName: fhubWhenActive, type: STRING, conditional: GREATER_EQUALS, values: ["2026-12-01T09:00:00Z"]}, clock: "2026-12-02T00:00:00Z", result: true, shows: "type ignored"}
+      - {attribute: {fieldName: fhubWhenActive, type: DATETIME, conditional: GREATER, values: ["2026-12-01T09:00:00Z"]}, clock: "2026-12-01T09:00:00.000Z", result: false, shows: "GREATER is strictly after"}
+      - {attribute: {fieldName: fhubWhenActive, type: DATETIME, conditional: LESS, values: ["2026-12-01T09:00:00Z"]}, clock: "2026-12-01T08:59:59.999Z", result: true, shows: "LESS: applies until the time"}
+      - {attribute: {fieldName: fhubWhenActive, type: DATETIME, conditional: LESS, values: ["2026-12-01T09:00:00Z"]}, clock: "2026-12-01T09:00:00.000Z", result: false}
+      - {attribute: {fieldName: fhubWhenActive, type: DATETIME, conditional: LESS_EQUALS, values: ["2026-12-01T09:00:00Z"]}, clock: "2026-12-01T09:00:00.000Z", result: true}
+      - {attribute: {fieldName: fhubWhenActive, type: DATETIME, conditional: EQUALS, values: ["2026-12-01T09:00:00Z"]}, clock: "2026-12-01T09:00:00.000Z", result: true}
+      - {attribute: {fieldName: fhubWhenActive, type: DATETIME, conditional: EQUALS, values: ["2026-12-01T09:00:00Z"]}, clock: "2026-12-01T09:00:00.001Z", result: false, shows: "compared on instants, to the millisecond"}
+      - {attribute: {fieldName: fhubWhenActive, type: DATETIME, conditional: NOT_EQUALS, values: ["2026-12-01T09:00:00Z"]}, clock: "2026-12-01T09:00:00.001Z", result: true}
+      - {attribute: {fieldName: fhubWhenActive, type: DATETIME, conditional: INCLUDES, values: ["2026-12-01T09:00:00Z"]}, clock: "2027-01-01T00:00:00Z", result: false, shows: "other conditionals never match"}
+      - {attribute: {fieldName: fhubWhenActive, type: DATETIME, conditional: EXCLUDES, values: ["2026-12-01T09:00:00Z"]}, clock: "2027-01-01T00:00:00Z", result: false}
+      - {attribute: {fieldName: fhubWhenActive, type: DATETIME, conditional: NOT_EQUALS, values: []}, clock: "2027-01-01T00:00:00Z", result: false, shows: "no values never match, NOT_EQUALS included"}
       - {attribute: {fieldName: FHUBWHENACTIVE, type: DATETIME, conditional: GREATER_EQUALS, values: ["2026-12-01T09:00:00Z"]}, clock: "2026-12-02T00:00:00Z", result: true, shows: "name is case-insensitive"}
       - {attribute: {fieldName: fhubWhenActive, type: DATETIME, conditional: GREATER_EQUALS, values: ["2026-12-01T09:00:00Z"]}, clock: "2026-11-30T00:00:00Z", context: {fhubWhenActive: "2020-01-01T00:00:00Z"}, result: false, shows: "the context cannot supply it"}
       - {attribute: {fieldName: fhubWhenActive, type: DATETIME, conditional: GREATER_EQUALS, values: []}, clock: "2026-12-02T00:00:00Z", result: false}
