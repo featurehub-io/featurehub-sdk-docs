@@ -29,9 +29,12 @@
 
 spec:
   name: featurehub-rollout-strategies
-  version: 1.1.0
+  version: 1.2.0
   status: implemented-in-dart; conforms to the TypeScript SDK via the golden fixture
   changelog:
+    - version: 1.2.0
+      changes:
+        - "well_known_attributes.fhubWhenActive: a strategy attribute named fhubWhenActive holds a UTC ISO-8601 date-time and matches when the clock of the machine the SDK runs on is at or after it; it is never taken from the context, so a strategy can switch a feature on at a given moment"
     - version: 1.1.0
       changes:
         - "js_conversions.strict_number: NUMBER attributes no longer use JavaScript's parseInt / parseFloat; a supplied value that is not a strict decimal number never matches, and values that are not numbers are ignored"
@@ -130,6 +133,7 @@ algorithm:
   attributes_match:
     rules:
       - "every attribute must match (AND)"
+      - "if attr.fieldName is fhubWhenActive (case-insensitive): it matches as well_known_attributes.fhubWhenActive says, and the rules below do not apply"
       - "supplied := context.get_attr(attr.fieldName)"
       - "if supplied is absent (or is an empty list and fieldName is \"now\", case-insensitive): for type DATE use [today as YYYY-MM-DD in UTC]; for DATETIME use [now as an ISO-8601 UTC date-time]"
       - "if supplied is still absent: the attribute does not match"
@@ -141,6 +145,87 @@ algorithm:
       context supplies an empty list; decoders that turn null values into an
       empty list cannot tell the cases apart, and an empty supplied list never
       matches either way.
+
+  well_known_attributes:
+    fhubWhenActive:
+      purpose: >-
+        Lets whoever creates a feature's strategy make it activate (turn a
+        feature on, say) at or after a given date and time, with no help from
+        the application.
+      recognised: >-
+        A strategy attribute whose fieldName is fhubWhenActive, compared
+        case-insensitively (fhubwhenactive is the same name). It is set by
+        FeatureHub, never by the application.
+      value: >-
+        The attribute's values hold one ISO-8601 date-time, always in UTC
+        (e.g. "2026-12-01T09:00:00Z"; fractional seconds may be present).
+        Implementations SHOULD also accept a date-time with an explicit
+        offset, converting it to UTC.
+      rule: >-
+        The attribute matches if the current time of the machine the SDK is
+        running on (UTC) is equal to or after that date-time, and does not
+        match before it. The comparison is on instants, to the precision of
+        the value (milliseconds, where it has them), not on strings.
+      ignored: >-
+        The attribute's conditional and type are ignored, whatever they say
+        (FeatureHub sends DATETIME / GREATER_EQUALS, but evaluation MUST NOT
+        depend on them).
+      never_from_context: >-
+        The time is never taken from the evaluation context: a context
+        attribute named fhubWhenActive (in any case), or `now`, has no effect
+        on it, and the application cannot supply or override the time. Only
+        the clock is used (featurehub-protocol.yaml
+        encoding.evaluation_context drops such a context key).
+      several_values: >-
+        FeatureHub sends exactly one value. If there are several, the
+        attribute matches if the clock is at or after ANY of them (that is,
+        the earliest), as other attributes match on any value; null values
+        are dropped first.
+      no_match: >-
+        No values (null, absent or empty), or a value that is not a valid
+        ISO-8601 date-time: the attribute does not match, so the strategy
+        does not activate. Implementations MUST NOT throw.
+      combines: >-
+        It can be combined with anything a strategy can hold, and nothing
+        may prevent that: other attributes (of any type or name), a
+        percentage, percentageAttributes, or several fhubWhenActive strategies
+        with different times. It is an ordinary attribute in every other
+        respect: it counts towards has_attrs and is ANDed with the strategy's
+        other attributes, so the strategy matches only when the time is
+        reached AND the rest of the strategy matches. With a percentage the
+        strategy is a percentage strategy with attributes (it compares against
+        its own percentage and does not stack). An implementation MUST NOT
+        reject, skip or treat specially a strategy because it combines
+        fhubWhenActive with other rules. A strategy with only fhubWhenActive
+        matches everyone once the time is reached.
+      combinations:   # examples of what combining allows
+        - "a percentage change at a time: a 10% strategy, and before it a 50% strategy with fhubWhenActive 2026-12-01T09:00:00Z; from then on 50% get the value"
+        - "a country rollout at a time: country EQUALS [nz, au] AND fhubWhenActive 2026-12-01T09:00:00Z; only those countries get it, and only from then"
+        - "a staged rollout: several strategies with fhubWhenActive at successive times, each with its own percentage or attributes"
+      evaluated_each_time: >-
+        The result changes as time passes with no new features from the
+        source, so it MUST be worked out from the clock on every evaluation,
+        never cached with the features or across evaluations. An SDK SHOULD
+        let tests supply the clock.
+      server_evaluated: >-
+        For a server-evaluated key Edge evaluates it, with Edge's clock, and
+        the value changes for the SDK only when Edge next sends features (the
+        next poll or stream event).
+    vectors:   # clock is the machine's current time
+      - {attribute: {fieldName: fhubWhenActive, type: DATETIME, conditional: GREATER_EQUALS, values: ["2026-12-01T09:00:00Z"]}, clock: "2026-12-01T08:59:59.999Z", result: false}
+      - {attribute: {fieldName: fhubWhenActive, type: DATETIME, conditional: GREATER_EQUALS, values: ["2026-12-01T09:00:00Z"]}, clock: "2026-12-01T09:00:00.000Z", result: true, shows: "at the time is a match"}
+      - {attribute: {fieldName: fhubWhenActive, type: DATETIME, conditional: GREATER_EQUALS, values: ["2026-12-01T09:00:00Z"]}, clock: "2027-01-01T00:00:00Z", result: true}
+      - {attribute: {fieldName: fhubWhenActive, type: STRING, conditional: EQUALS, values: ["2026-12-01T09:00:00Z"]}, clock: "2026-12-02T00:00:00Z", result: true, shows: "type and conditional ignored"}
+      - {attribute: {fieldName: FHUBWHENACTIVE, type: DATETIME, conditional: GREATER_EQUALS, values: ["2026-12-01T09:00:00Z"]}, clock: "2026-12-02T00:00:00Z", result: true, shows: "name is case-insensitive"}
+      - {attribute: {fieldName: fhubWhenActive, type: DATETIME, conditional: GREATER_EQUALS, values: ["2026-12-01T09:00:00Z"]}, clock: "2026-11-30T00:00:00Z", context: {fhubWhenActive: "2020-01-01T00:00:00Z"}, result: false, shows: "the context cannot supply it"}
+      - {attribute: {fieldName: fhubWhenActive, type: DATETIME, conditional: GREATER_EQUALS, values: []}, clock: "2026-12-02T00:00:00Z", result: false}
+      - {attribute: {fieldName: fhubWhenActive, type: DATETIME, conditional: GREATER_EQUALS, values: ["next tuesday"]}, clock: "2026-12-02T00:00:00Z", result: false, shows: "unparseable never matches"}
+    strategy_vectors:   # whole strategies combining fhubWhenActive with other rules
+      - {strategy: {attributes: [{fieldName: fhubWhenActive, type: DATETIME, conditional: GREATER_EQUALS, values: ["2026-12-01T09:00:00Z"]}, {fieldName: country, type: STRING, conditional: EQUALS, values: [nz]}]}, clock: "2026-12-02T00:00:00Z", context: {country: nz}, matched: true}
+      - {strategy: {attributes: [{fieldName: fhubWhenActive, type: DATETIME, conditional: GREATER_EQUALS, values: ["2026-12-01T09:00:00Z"]}, {fieldName: country, type: STRING, conditional: EQUALS, values: [nz]}]}, clock: "2026-12-02T00:00:00Z", context: {country: au}, matched: false, shows: "time reached, country does not match"}
+      - {strategy: {attributes: [{fieldName: fhubWhenActive, type: DATETIME, conditional: GREATER_EQUALS, values: ["2026-12-01T09:00:00Z"]}, {fieldName: country, type: STRING, conditional: EQUALS, values: [nz]}]}, clock: "2026-11-30T00:00:00Z", context: {country: nz}, matched: false, shows: "country matches, time not reached"}
+      - {strategy: {percentage: 1000000, attributes: [{fieldName: fhubWhenActive, type: DATETIME, conditional: GREATER_EQUALS, values: ["2026-12-01T09:00:00Z"]}]}, clock: "2026-12-02T00:00:00Z", context: {userkey: fred}, matched: true, shows: "with a percentage"}
+      - {strategy: {percentage: 1000000, attributes: [{fieldName: fhubWhenActive, type: DATETIME, conditional: GREATER_EQUALS, values: ["2026-12-01T09:00:00Z"]}]}, clock: "2026-11-30T00:00:00Z", context: {userkey: fred}, matched: false}
 
 # ---------------------------------------------------------------------------
 # 3. Conversions borrowed from JavaScript (the source of most porting bugs)
@@ -339,3 +424,4 @@ golden_fixture:
     - "date-times without an offset (local time): the fixture is generated with TZ=UTC"
     - "native date-time values in the context (JSON has none; they are normalised to UTC like strings)"
     - "the null-values EQUALS case described under algorithm.attributes_match.note"
+    - "fhubWhenActive (algorithm.well_known_attributes): the TypeScript SDK does not implement it, so the fixture has no cases; test its vectors, and a strategy with it before and after the time, with a fixed clock"
