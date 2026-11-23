@@ -46,9 +46,11 @@ spec:
         - "featurehub_edge.sdk_version replaces featurehub_edge.sdk_identification: the sdk and version query parameters are dropped, and polling (activePolling and passivePolling) and streaming MUST send sdk_version=2 (spec.sdk_version, the protocol generation this specification defines; it changes only when the wire protocol to Edge changes, not with minor or patch releases of this specification). Every SDK that adheres to this specification sends the same URL, so a CDN in front of Edge is not fragmented by SDK, language or release"
         - "featurehub_edge.sdk_version.generations: a request without sdk_version is generation 1. Edge honours Last-Event-ID, and holds quiet connections, only for sdk_version 2 or more; generation 1 always gets the full features on every connection"
         - "featurehub_edge.query_parameters: the SDK's query parameters come in a fixed order, contextSha, sdk_version, then xfeaturehub (after the apiKey parameters when polling), so equal requests have equal URLs for a CDN. Streaming now sends contextSha too"
-        - "featurehub_edge.streaming.last_event_id.short_connections: a connection that ends less than 10 seconds after it opened, with a bye or without, is a failure (a cache in front of Edge replaying a closed stream), and nothing it delivers resets the failure count; consecutive ones SHOULD be logged as a likely cache misconfiguration"
+        - "featurehub_edge.streaming.last_event_id.short_connections: a connection that opens and ends less than 10 seconds after its request, with a bye or without, is a failure (a cache in front of Edge replaying a closed stream), and nothing it delivers resets the failure count; consecutive ones SHOULD be logged as a likely cache misconfiguration"
         - "providers.environment_variables.durations: every duration variable uses one strict grammar (a single number and a lowercase unit, ms, s, m or h, or 0), not Go's time.ParseDuration; compound values such as 1m30s are not accepted"
         - "providers.environment_variables.legacy_names: only new SDKs (Dart and Go) implement this specification, and they read none of the legacy names"
+        - "encoding.rollout_strategy.well_known_field_names.fhubWhenActive: a strategy attribute holding a UTC ISO-8601 date-time, matched when the SDK's clock is at or after it (rollout-strategies.yaml algorithm.well_known_attributes.fhubWhenActive); encoding.evaluation_context drops a context key of that name, so the application can never supply it"
+        - "providers.default_mode replaces featurehub_edge.streaming.server_evaluated.no_default_mode: the default depends on the provider, not the key. A client-side provider polls actively at its default interval; a server-side provider streams (or polls actively with an interval), a server-evaluated key included where the SDK supports server-evaluated streaming"
     - version: 1.1.0
       changes:
         - "featurehub_edge.sdk_identification: polling (activePolling and passivePolling) and streaming MUST send sdk (the SDK's name/language) and version (the SDK's version) query parameters on every request to Edge"
@@ -135,10 +137,30 @@ encoding:
             properties:
               id: {type: string}
               conditional: {enum: [EQUALS, ENDS_WITH, STARTS_WITH, GREATER, GREATER_EQUALS, LESS, LESS_EQUALS, NOT_EQUALS, INCLUDES, EXCLUDES, REGEX]}
-              fieldName: {type: string}
+              fieldName: {type: string, description: "The context attribute to match, or a strategy-only well-known name (well_known_field_names)."}
               values: {type: [array, "null"], description: "Nullable; absent or null has the same meaning as an empty list."}
               type: {enum: [STRING, SEMANTIC_VERSION, NUMBER, DATE, DATETIME, BOOLEAN, IP_ADDRESS]}
 
+    well_known_field_names:
+      description: >-
+        Attribute fieldNames that FeatureHub sets in a strategy and that are
+        not read from the evaluation context.
+      fhubWhenActive: >-
+        Its values hold one ISO-8601 date-time, always UTC (e.g.
+        "2026-12-01T09:00:00Z"). It matches when the current time of the
+        machine the SDK runs on is equal to or after it, and not before, so a
+        strategy can activate a feature at or after a given moment. The time
+        always comes from the clock, never from the context (the
+        application cannot supply it: evaluation_context drops a context key
+        of that name). The name is case-insensitive; the attribute's
+        conditional and type are ignored. It combines freely with every other
+        rule a strategy can hold (other attributes, a percentage,
+        percentageAttributes), ANDed with them, for example to change a
+        percentage, or roll out to specific countries, at a given time;
+        nothing may prevent such a combination. Evaluation is in rollout-strategies.yaml
+        algorithm.well_known_attributes.fhubWhenActive.
+      example:
+        {id: s1, value: true, attributes: [{fieldName: fhubWhenActive, type: DATETIME, conditional: GREATER_EQUALS, values: ["2026-12-01T09:00:00Z"]}]}
     decoding_rules:
       - "attributes, percentageAttributes, an attribute's values and percentage are nullable, and may be absent: decoders MUST accept null and absence (other SDKs keep them as null; the Dart one decodes the lists as empty lists)"
       - "the meaning is the same either way: evaluation (rollout-strategies.yaml) treats a null or absent list exactly like an empty one, and a null percentage as none"
@@ -205,6 +227,12 @@ encoding:
         written lowercase; userkey is handled by the rule above. Nothing else
         (email, for example) is well-known: implementations SHOULD take the
         list from the generated model rather than keep their own copy.
+      - >-
+        a key fhubWhenActive (case-insensitive) is dropped: it is a
+        strategy-only name (rollout_strategy.well_known_field_names), never
+        supplied by the application, so it is neither sent to a source nor
+        seen by local evaluation. If StrategyAttributeWellKnownNames lists it,
+        this rule still applies; it is not a context key.
       - any other key passes through unchanged (case preserved)
       - "allowed values: string, number, boolean, date-time, or a list of those"
       - "any other value (an object, or a list containing one) is an invalid context: server -> 400; client provider -> INVALID_CONTEXT error"
@@ -520,7 +548,7 @@ transport:
 # ---------------------------------------------------------------------------
 providers:
   source_selection:
-    - {given: "host + apiKey", transport: "FeatureHub: FeatureHubSseTransport for streaming (the default for a client-evaluated key), FeatureHubPollingTransport for activePolling or passivePolling. A server-evaluated key has no default mode: it must be chosen; streaming is only available in an SDK that supports it (featurehub_edge.streaming.server_evaluated)"}
+    - {given: "host + apiKey", transport: "FeatureHub: FeatureHubSseTransport for streaming, FeatureHubPollingTransport for activePolling or passivePolling. The mode by default is the provider's (default_mode); streaming a server-evaluated key is only available in an SDK that supports it (featurehub_edge.streaming.server_evaluated)"}
     - {given: "featuresUrl, and no apiKey", transport: "your own server: FeatureSnapshotTransport, activePolling (the default, for the providers and FeatureHubConnection alike) or passivePolling; streaming is an error unless a transportFactory is given (feature-snapshot-protocol.yaml)"}
     - {given: "transportFactory", transport: "the custom transport (it may use any of host, apiKey, featuresUrl)"}
     - {given: "only stores", transport: "none; features come from stores"}
@@ -529,10 +557,33 @@ providers:
     - featuresUrl together with host or apiKey
     - featuresUrl with streaming and no transportFactory
     - "a server-evaluated key (no '*') with streaming, and no transportFactory, in an SDK that does not support server-evaluated streaming (featurehub_edge.streaming.server_evaluated)"
-    - "a server-evaluated key (no '*') with no mode, and no transportFactory: the mode must be given, explicitly or through the SDK's environment variables where it reads them (featurehub_edge.streaming.server_evaluated)"
+    - "a server-side provider, in an SDK that does not support server-evaluated streaming, with a server-evaluated key (no '*'), no mode (in code or the environment), no interval and no transportFactory: its default, streaming, is not available, so the mode must be given (default_mode)"
     - "nothing to get features from (no host+apiKey, featuresUrl, transportFactory or stores)"
     - "server provider: activePolling or passivePolling without a pollInterval (0 is a valid interval: poll once, polling_transport.interval.zero_polls_once)"
     - "a negative pollInterval, or one between 0 and 5 seconds (activePolling or passivePolling, FeatureHub or your own server; polling_transport.interval.minimum)"
+  default_mode:
+    description: >-
+      The mode a provider uses when none is given, in code or (server-side)
+      by the environment (environment_variables.mode_selection). It depends
+      on the kind of provider, not on the key: client- and server-evaluated
+      keys default alike.
+    client_side: >-
+      A client-side provider (an app, a browser; Dart's
+      featurehub-openfeatures-client provider) defaults to activePolling, at
+      its default poll interval (Dart: 30 seconds), for any key and for a
+      featuresUrl. Polling suits apps: they are often suspended or offline,
+      and a poll needs no connection held open.
+    server_side: >-
+      A server-side provider (Dart's featurehub-openfeatures-server provider)
+      defaults to streaming, for any key, unless it has a poll interval (in
+      code or FEATUREHUB_CONNECT_INTERVAL), when it polls actively. A
+      featuresUrl is never streamed, so it polls actively and needs an
+      interval. In an SDK that does not support server-evaluated streaming
+      (featurehub_edge.streaming.server_evaluated), a server-evaluated key
+      has no default: its mode must be given (validation_errors).
+    connection: >-
+      An SDK's lower-level connection (Dart: FeatureHubConnection) MAY keep
+      its own default; the providers always give it the mode they chose.
   environment_variables:
     description: >-
       The environment variables an SDK reads its configuration from, so that
@@ -660,12 +711,11 @@ providers:
           it is a validation error (providers.validation_errors)
         - "FEATUREHUB_CONNECT_TYPE not set, FEATUREHUB_CONNECT_INTERVAL set: activePolling at that interval. For any key"
         - >-
-          neither set: streaming. For a client-evaluated key always; for a
-          server-evaluated key only in an SDK that supports server-evaluated
-          streaming - in one that does not, a server-evaluated key with
-          neither variable set is a validation error
-          (providers.validation_errors), so the application must choose
-          polling.
+          neither set: the provider's default (providers.default_mode.server_side):
+          streaming, for any key - in an SDK that does not support
+          server-evaluated streaming, a server-evaluated key with neither
+          variable set is a validation error (providers.validation_errors),
+          so the application must choose polling.
       featuresUrl: "your own server (feature-snapshot-protocol.yaml) never streams by default: FEATUREHUB_CONNECT_TYPE chooses between active (the default) and passive, with the interval as in mode_selection.interval, and FEATUREHUB_CONNECT_TYPE=streaming is a validation error (providers.validation_errors). As there is no default interval, a featuresUrl with neither variable set and no interval in code is a validation error too"
   local_evaluation_rule:
     description: Whether resolutions evaluate strategies locally (clientEvaluated) or the source is sent the context (sendsContext = !clientEvaluated).
@@ -1012,9 +1062,9 @@ featurehub_edge:
         threshold: 10 seconds
         rule: >-
           Edge never ends a connection of its own accord sooner than the end
-          of its wait, so a connection that ends less than 10 seconds after
-          it opened did not come from Edge working normally, whether it ended
-          with a bye or not. It MUST be counted as a failure (the
+          of its wait, so a connection that opens and ends less than 10
+          seconds after its request was made did not come from Edge working
+          normally, whether it ended with a bye or not. It MUST be counted as a failure (the
           network-error delay, growing with the backoff, and counting towards
           the maximum attempts: connection_errors), and nothing it delivered
           resets the count of consecutive failures (attempt_reset) - not its
@@ -1029,13 +1079,20 @@ featurehub_edge:
           first-attempt delay, for ever. Counted as failures, they back off to
           the maximum wait, and stop where a maximum number of attempts is
           configured (a permanent failure: stopping_for_good).
+        measured_from: >-
+          The 10 seconds are measured from the request, not from the
+          response: a server or proxy that holds the response headers back
+          until it has data (until Edge's bye, on a quiet connection) would
+          otherwise make a long connection look short. A connection attempt
+          that fails before the stream opens is a failure as usual
+          (connection_errors), not a short connection.
         reset_timing: >-
           The reset an event earns (attempt_reset) therefore takes effect
-          once the connection has been open for the threshold: an event in
-          the first 10 seconds marks the reset as due, and it is made when the
-          connection reaches 10 seconds (or at once, for an event after
-          that). A connection that ends before then counts as a failure and
-          the due reset is dropped.
+          once the threshold has passed since the request: an event before
+          then marks the reset as due, and it is made when the threshold is
+          reached (or at once, for an event after that). A connection that
+          ends before then counts as a failure and the due reset is
+          dropped.
         diagnosis: >-
           After 3 consecutive short connections an SDK SHOULD log a warning,
           once until a connection lasts past the threshold, saying that
@@ -1050,7 +1107,8 @@ featurehub_edge:
           A browser's EventSource reconnects by itself, without telling the
           client how long the connection lasted, and does not back off. A
           browser SDK SHOULD apply the rule where it can see the connection:
-          from its open event to the error or bye that ends it. If short
+          from when it creates the EventSource, or the browser starts a
+          reconnection (its error event), to the error that ends it. If short
           connections reach the maximum attempts (or, without one, a run of
           them that never stops) it closes the EventSource and treats it as
           a permanent failure (connection_errors.browsers).
@@ -1075,13 +1133,15 @@ featurehub_edge:
         context and the application would get wrong values with no error: a
         streaming mode with one is then rejected at configuration
         (providers.validation_errors), unless a transportFactory is given.
-      no_default_mode: >-
-        A server-evaluated key has no default mode, in every SDK: the mode
-        MUST be chosen. An SDK that reads its configuration from environment
-        variables (FEATUREHUB_CONNECT_TYPE, or an SDK's legacy variables:
-        providers.environment_variables) MAY take the mode
-        from them; if no mode is given explicitly or by them, it is a
-        validation error (providers.validation_errors).
+      default_mode: >-
+        A server-evaluated key takes the provider's default mode
+        (providers.default_mode): a client-side provider polls, and a
+        server-side one streams where the SDK supports it. In an SDK that
+        does not, a server-side provider has no default for a
+        server-evaluated key: the mode MUST be chosen, in code or by the
+        environment (FEATUREHUB_CONNECT_TYPE, or an SDK's legacy variables:
+        providers.environment_variables), or it is a validation error
+        (providers.validation_errors).
       sdk_status: >-
         The Go, Python, .NET and Ruby SDKs do not support server-evaluated
         keys over streaming (they do not send x-featurehub on the SSE
@@ -1261,6 +1321,20 @@ conformance:
     check: "features received, a context change (readiness Stale, never NotReady), then a failure: connection_failed is raised, readiness stays Stale (not Failed), and the old features still resolve"
   - id: context-change-readiness
     check: "a context change takes readiness Ready -> Stale and, when the new context's features arrive, Stale -> Ready; the provider reports RECONCILING then CONTEXT_CHANGED, never STALE"
+  - id: when-active
+    check: >-
+      a strategy whose only attribute is fhubWhenActive with a time T (and
+      a clock the test controls) does not match before T and matches at T and
+      after, with no new features delivered in between; a context with
+      fhubWhenActive set (to a time before T) changes nothing, and the key is
+      not in the x-featurehub header or the query parameters sent
+  - id: when-active-combined
+    check: >-
+      a strategy with fhubWhenActive at T and country EQUALS nz matches a
+      context with country nz only at or after T, and never one with
+      country au; a 100% strategy with fhubWhenActive at T matches any
+      user key only at or after T; neither is rejected or skipped at
+      decoding or configuration
   - id: x-featurehub-encoding
     check: "encoding.evaluation_context.x_featurehub_header.examples all reproduce: keys and values are both encoded, then the encoded strings sorted"
   - id: edge-stale
@@ -1341,8 +1415,10 @@ conformance:
       is set; with either set, the legacy ones are ignored
   - id: environment-names
     check: "each name in providers.environment_variables.names is read, with that meaning, by every server-side SDK; no client-side SDK reads them"
-  - id: connection-default-mode
-    check: "a FeatureHubConnection with a featuresUrl and no mode polls actively; with a host and a client-evaluated key it streams; with a server-evaluated key and no mode (none from environment variables either) it is a validation error"
+  - id: client-default-mode
+    check: "a client-side provider with no mode polls actively at its default interval, with a client-evaluated key, a server-evaluated key and a featuresUrl alike"
+  - id: server-default-mode
+    check: "a server-side provider with no mode and no interval (in code or the environment) streams, with a client- or a server-evaluated key (in an SDK without server-evaluated streaming, a server-evaluated key is then a validation error); with an interval it polls actively; with a featuresUrl it polls actively, and without an interval it is a validation error"
   - id: server-evaluated-streaming
     check: "a server-evaluated key with streaming, in an SDK that supports it, sends the context on every connection and reconnection; in one that does not, it is rejected at configuration and no stream is opened; with activePolling or passivePolling it polls, sending x-featurehub"
   - id: sdk-version
