@@ -38,6 +38,8 @@ spec:
   changelog:
     - version: 1.1.1
       changes:
+        - "repository.connection_events: how connection_failed and environment_stale reach listeners. Both flags and a subscription MUST be public on the repository and on the configuration a provider is built on; each event is broadcast once, after any readiness broadcast it causes; a listener added late is told at once; it is broadcast even while catch-and-release holds back readiness; a failing listener does not stop the others"
+        - "providers.initialisation: Ready succeeds; Failed is PROVIDER_FATAL; Stale with the connection stopped (it stopped with the first features) succeeds, with STALE after READY; anything else at the deadline, a context change in progress included, is ERROR (GENERAL). providers.stale_source: STALE comes from the connection events, never from readiness"
         - "featurehub_edge.polling.edge_api: the extract is of Edge OpenAPI 1.2.0, which adds sdk_version to getFeatureStates and pollInterval to FeatureEnvironmentCollection, and requires FeatureState's version and type as non-nullable, with l optional and nullable, defaulting to false (encoding.feature_state.required_fields); a decoder still skips a feature without, or with a null, version or type"
         - "featurehub_edge.polling.poll_interval replaces featurehub_edge.polling.cache_control: the server's polling interval override comes from the pollInterval field (whole seconds, nullable, optional) of each FeatureEnvironmentCollection in a 200 or 236 body, not from the Cache-Control header. Edge omits the field rather than send a value below 5, and SDKs ignore any below 5 regardless; of the environments' values of at least 5, the smallest is used; with none the configured interval applies again. SDKs MUST remove any code that reads Cache-Control max-age to change the interval (Edge still sends Cache-Control, for HTTP caches). FeatureHub never supported max-age as a polling signal and reading it is broken, so the removal is a MUST for every SDK, whatever sdk_version it sends (version 1 included)"
         - "featurehub_edge.streaming.last_event_id: SSE clients keep the last event id and send it as Last-Event-ID on reconnection (not for a new context). Edge then sends no features if nothing is new: it holds the connection (typically 60 seconds, up to 3 to 5 minutes), possibly silent, then sends bye and closes, so several reconnections may bring no updates. A bye ends a connection cleanly and resets the failure count (attempt_reset); read timeouts SHOULD exceed 5 minutes"
@@ -488,8 +490,8 @@ repository:
       more (transport.permanent_failure). The repository sets
       connectionFailed = true, once, and broadcasts it to its listeners as
       its own event (not as a readiness change; readiness changes as in
-      notifications.failure, and is broadcast separately). Later
-      notify(failure) calls change nothing. Providers use it, with
+      notifications.failure, and is broadcast separately; how listeners are
+      told: connection_events). Later notify(failure) calls change nothing. Providers use it, with
       environment_stale, to report STALE: a Stale readiness alone (a context
       change in progress) is not a reason to.
   environment_stale:
@@ -500,12 +502,42 @@ repository:
       streaming),
       after the last features. Sets environmentStale = true, once, and
       broadcasts it to its listeners as its own event (as connection_failed
-      is). Readiness goes from Ready to Stale, or stays Stale (if no features
+      is: connection_events). Readiness goes from Ready to Stale, or stays Stale (if no features
       have ever been received, readiness is unchanged); initialisation has
       already finished, and resolutions continue from the last features. Providers report STALE,
       permanently. It is a separate signal from bye because a bye means the
       source will send more (it is reconnecting), and a stale environment
       means it never will.
+  connection_events:
+    description: >-
+      How connection_failed and environment_stale reach their listeners.
+      They are the only reliable signal that the source has stopped for
+      good: readiness may already be Stale (a context change in progress)
+      when one happens, and then no readiness broadcast follows it.
+    exposure: >-
+      The repository, and the configuration or connection a provider is
+      built on, MUST expose both flags (connectionFailed, environmentStale)
+      and a way to subscribe to both events as part of their public API, not
+      only internally. JavaScript: connectionFailed, environmentStale and
+      addConnectionEventListener (ConnectionEvent.ConnectionFailed,
+      ConnectionEvent.EnvironmentStale) on FeatureHubConfig and
+      FeatureHubRepository.
+    once: >-
+      Each is broadcast once, when it first happens. Repeating it (another
+      notify(failure), another markEnvironmentStale()) broadcasts nothing.
+    late_listeners: >-
+      A listener added after an event has happened MUST be told it at once,
+      when it is added (connection_failed before environment_stale if both
+      have), so a provider that subscribes late misses nothing.
+    order: >-
+      When the event also changes readiness, the readiness broadcast comes
+      first and the event after it, so a listener told the event can rely on
+      readiness already being Stale (or Failed).
+    catch_and_release: >-
+      Where catch-and-release is supported, the event is broadcast even
+      while catch-and-release holds back the readiness broadcast: it is about
+      the connection, not the features.
+    listener_errors: a listener that throws is logged, and the other listeners are still told
   update_rule: >-
     Reject an incoming feature if the held one has a higher version, or the
     same version and the same value, v, id and type. Otherwise replace it.
@@ -814,6 +846,22 @@ providers:
         once; never followed by READY or ERROR. Resolutions continue from the
         last features, with their usual reasons.
     - {on: "applied changes that alter a feature's version, or remove/add one", event: "CONFIGURATION_CHANGED with the changed keys"}
+  initialisation:
+    rule: >-
+      A provider's initialisation waits up to waitForReady for readiness,
+      then: Ready succeeds. Failed (the connection was rejected before any
+      features) fails with PROVIDER_FATAL. Stale with connection_failed or
+      environment_stale (the connection stopped with the first features)
+      succeeds, and STALE follows READY: where the OpenFeature SDK emits
+      READY itself when initialisation returns, the provider emits STALE
+      after that, not during initialisation. Anything else at the deadline,
+      including Stale only because a context change is in progress, is a
+      timeout: ERROR (GENERAL), not PROVIDER_FATAL.
+  stale_source: >-
+    STALE comes from repository.connection_events, never from a readiness
+    change: a failure answering a context change leaves readiness Stale, so
+    only the event tells it, and a context change on its own (also Stale)
+    must not report it.
   resolution: >-
     How a resolved feature becomes an OpenFeature result (reasons, variants,
     type conversion, error codes, flag metadata) is specified in
@@ -1498,6 +1546,14 @@ conformance:
     check: "the event source stopping for good (a 4xx, an unretried status, no attempts left) notifies failure, never bye"
   - id: permanent-failure
     check: "a permanent failure before features raises connection_failed, sets readiness Failed and fails initialisation (PROVIDER_FATAL); after them it raises connection_failed, readiness goes from Ready to Stale, the provider reports STALE once and keeps resolving"
+  - id: connection-events
+    check: "connection_failed and environment_stale are each broadcast once, however often they recur; a listener added after either is told at once; when readiness changes too, its broadcast comes first; a listener that throws does not stop the others; the flags and the subscription are on the provider-facing configuration"
+  - id: provider-stale-during-context-change
+    check: "features received, then a context change (readiness Stale) answered by a failure, or environment_stale: the provider reports STALE once, from the connection event, and keeps resolving the old features; a context change answered by features reports no STALE and no second READY"
+  - id: provider-stale-on-first-response
+    check: "the first response delivers features and then the connection stops (a 4xx after them, or a 236): initialisation succeeds, and the provider reports READY then STALE, in that order"
+  - id: provider-initialisation-outcomes
+    check: "initialisation fails with PROVIDER_FATAL when rejected before any features, and with ERROR (GENERAL), not PROVIDER_FATAL, when readiness is not Ready at the deadline (Stale only because a context change is in progress included)"
   - id: readiness-broadcast
     check: "the first full set broadcasts Ready once; later full sets that leave readiness Ready broadcast nothing, while a changed feature in one still calls that feature's listeners; after a context change, the new context's full set broadcasts Ready (Stale -> Ready)"
   - id: readiness-transitions
