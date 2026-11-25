@@ -38,6 +38,7 @@ spec:
   changelog:
     - version: 1.1.1
       changes:
+        - "featurehub_edge.polling.poll_interval replaces featurehub_edge.polling.cache_control: the server's polling interval override comes from the pollInterval field (whole seconds, nullable, optional) of each FeatureEnvironmentCollection in a 200 or 236 body, not from the Cache-Control header. Edge omits the field rather than send a value below 5, and SDKs ignore any below 5 regardless; of the environments' values of at least 5, the smallest is used; with none the configured interval applies again. SDKs MUST remove any code that reads Cache-Control max-age to change the interval (Edge still sends Cache-Control, for HTTP caches). FeatureHub never supported max-age as a polling signal and reading it is broken, so the removal is a MUST for every SDK, whatever sdk_version it sends (version 1 included)"
         - "featurehub_edge.streaming.last_event_id: SSE clients keep the last event id and send it as Last-Event-ID on reconnection (not for a new context). Edge then sends no features if nothing is new: it holds the connection (typically 60 seconds, up to 3 to 5 minutes), possibly silent, then sends bye and closes, so several reconnections may bring no updates. A bye ends a connection cleanly and resets the failure count (attempt_reset); read timeouts SHOULD exceed 5 minutes"
         - "providers.environment_variables: FEATUREHUB_CONNECT_TYPE (active, passive or streaming) and FEATUREHUB_CONNECT_INTERVAL replace FEATUREHUB_POLLING_INTERVAL and FEATUREHUB_POLLING_PASSIVE, and give the default mode and interval (mode_selection). Active and passive both need an interval, in code or from FEATUREHUB_CONNECT_INTERVAL (passive no longer defaults to 0); streaming does not use it"
         - "providers.environment_variables.durations.connect_interval: FEATUREHUB_CONNECT_INTERVAL is a single number followed by a time unit (ms, s, m, h), and is 0 (connect once and stop) or at least 5 seconds"
@@ -53,6 +54,8 @@ spec:
         - "encoding.evaluation_context.context_sha: contextSha is defined once, with test vectors: the SHA-256 of the x-featurehub header as 64 lowercase hex characters, or 0 when there is no header (an empty header included). x_featurehub_header gains not_form_encoding, sorting and why_canonical: every SDK MUST build the same header, as the header's hash is a cache key; form encoders (space as +) and locale-aware sorting do not comply"
         - "repository.notifications.features: readiness is broadcast only when it changes (the initial Ready, and Stale -> Ready), not on every full set; repository.notifications.feature_changes: changed features have their own event, separate from readiness"
         - "rollout-strategies.yaml fhubWhenActive uses the attribute's conditional (EQUALS, NOT_EQUALS, GREATER, GREATER_EQUALS, LESS, LESS_EQUALS; any other never matches) and ignores its type"
+        - "date-times are written to the second: encoding.evaluation_context.wire_value sends a date-time as YYYY-MM-DDTHH:MM:SSZ (any fraction dropped), and fhubWhenActive is written and compared at seconds precision (rollout-strategies.yaml)"
+        - "transport.helpers: repository.loadFeatureSnapshot and repository.featuresSha are not part of the repository (they were never in a released SDK, so there is nothing to deprecate), and encoding.sha is not the repository's: the core SDK computes no SHA and builds no snapshot. The Redis store and a server SDK's snapshot store compute it (feature-snapshot-protocol.yaml 2.0.0 placement); a transport receiving snapshots decodes them itself and notifies a full set"
         - "providers.default_mode replaces featurehub_edge.streaming.server_evaluated.no_default_mode: the default depends on the provider, not the key. A client-side provider polls actively at its default interval; a server-side provider streams (or polls actively with an interval), a server-evaluated key included where the SDK supports server-evaluated streaming"
     - version: 1.1.0
       changes:
@@ -149,9 +152,10 @@ encoding:
         Attribute fieldNames that FeatureHub sets in a strategy and that are
         not read from the evaluation context.
       fhubWhenActive: >-
-        Its values hold one ISO-8601 date-time, always UTC (e.g.
-        "2026-12-01T09:00:00Z"). The current time of the machine the SDK runs
-        on is compared against it with the attribute's conditional: EQUALS,
+        Its values hold one ISO-8601 date-time, always UTC and written to the
+        second (e.g. "2026-12-01T09:00:00Z"). The current time of the machine
+        the SDK runs on, truncated to the second, is compared against it with
+        the attribute's conditional: EQUALS,
         NOT_EQUALS, GREATER, GREATER_EQUALS, LESS or LESS_EQUALS, the clock on
         the left (GREATER_EQUALS, the usual case, matches at or after the
         time, so a strategy can activate a feature at a given moment; LESS
@@ -185,21 +189,22 @@ encoding:
   sha:
     description: >-
       Identifies a set of features by their ids and versions only (not values).
-      Every FeatureHub SDK computes it the same way (the Redis store keys and the
-      snapshot ETag use it).
+      Computed the same way by every component that needs it: the Redis store
+      (its sha key) and a server SDK's snapshot store (the snapshot's sha and
+      ETag, feature-snapshot-protocol.yaml encoding.snapshot_sha). The core
+      SDK, the repository included, MUST NOT compute it
+      (feature-snapshot-protocol.yaml placement).
     algorithm:
-      - take the features (the repository's current features; keys that code has only asked for, with no feature, are excluded)
+      - take the features (the set the component holds; keys that code has only asked for, with no feature, are excluded)
       - sort by `id`, ascending, by plain string comparison (UTF-16 code unit order; equal to code point order for BMP ids)
       - map each to "<id>:<version>" (version as a base-10 integer)
       - join with "|"
       - SHA-256 of the UTF-8 bytes, as 64 lowercase hex characters
     when_recomputed: >-
-      The repository recomputes it after every applied change: a full set of
-      features, a single feature update, a delete, and clearing the features.
-      In SDKs that support catch-and-release (only some do, typically those
-      for user interfaces; see feature-store.yaml catch_and_release), also
-      after a release, and while updates are held back it describes the
-      applied features, not those held back.
+      By the component that holds it, after every change to the features it
+      holds (for the stores, as they follow the repository's raw feature
+      updates: feature-store.yaml raw_feature_updates). The repository keeps
+      no SHA.
     test_vectors:
       - features: []
         input: ""
@@ -247,7 +252,7 @@ encoding:
     wire_value:
       description: How each attribute value becomes a string when sent (query parameter or x-featurehub header).
       rules:
-        - "date-time: UTC ISO-8601 (e.g. 2026-11-17T02:47:28.000Z)"
+        - "date-time: UTC ISO-8601 to the second, YYYY-MM-DDTHH:MM:SSZ (e.g. 2026-11-17T02:47:28Z); any fraction of a second is dropped (truncated, not rounded)"
         - "number: JavaScript String(n) - whole floats without a fraction (3.0 -> \"3\"), NaN -> \"NaN\", Infinity -> \"Infinity\""
         - "boolean: \"true\" / \"false\""
         - "string: as is"
@@ -333,7 +338,8 @@ polling_transport:
       passivePolling's refreshIfStale does nothing (it MUST NOT treat a
       0-second-old snapshot as stale, which would make a request on every
       resolution). A failed first request is not retried. A FeatureHub
-      Cache-Control max-age does not start polling again. contextChanged
+      pollInterval (featurehub_edge.polling.poll_interval) does not start
+      polling again. contextChanged
       still makes its forced request (it is not periodic). Use it for
       short-lived processes, or features that are only read at start-up.
       The transport is not stopped or failed: the provider stays Ready with
@@ -343,8 +349,9 @@ polling_transport:
       configuration polls a server too often: a shorter one is a validation
       error (providers.validation_errors), never silently raised. It applies
       to FeatureHub polling and the snapshot client, in both modes. A
-      FeatureHub Cache-Control max-age below it is raised to it (the server
-      is not configuration, so it is not an error). An SDK MAY lower the
+      FeatureHub pollInterval below 5 seconds is ignored
+      (featurehub_edge.polling.poll_interval; the server is not
+      configuration, so it is not an error). An SDK MAY lower the
       minimum for its own tests, but MUST NOT let applications lower it (Go:
       core.MinPollingInterval, read from an internal package that only the
       SDK's tests can change; Dart: minPollingInterval in
@@ -366,8 +373,8 @@ polling_transport:
   active_polling:
     schedule: >-
       After each poll finishes, whether it succeeded or failed, wait the full
-      poll interval (or a FeatureHub Cache-Control max-age that replaced it;
-      see featurehub_edge.polling.cache_control) from when it finished, then
+      poll interval (or a FeatureHub pollInterval that replaced it;
+      see featurehub_edge.polling.poll_interval) from when it finished, then
       make a forced request, then schedule again. The wait is measured from
       the end of the poll, not its start, so a slow or failing server is
       never polled faster than the interval and a failure never becomes a
@@ -557,21 +564,15 @@ transport:
       environment (236, edge.stale) is not a failure either: the provider
       reports STALE and readiness goes from Ready to Stale (repository.environment_stale).
   helpers:
-    requirement: >-
-      OPTIONAL. An SDK that implements feature-snapshot-protocol.yaml MUST
-      provide both; an SDK that does not MAY omit them.
-    loadFeatureSnapshot: >-
-      repository.loadFeatureSnapshot(data): loads a feature_snapshot, its JSON
-      (a map or a string) or a bare array of features as a full set (the same
-      as notify(features)), decoding as feature-snapshot-protocol.yaml
-      encoding.feature_snapshot.decoding,
-      and returns the snapshot. A format error leaves the repository
-      unchanged. The snapshot client uses it; a custom transport receiving
-      snapshots can too.
-    featuresSha: >-
-      repository.featuresSha: encoding.sha of the features held, recomputed
-      on every applied change. A transport can send it as an ETag, or compare
-      it with a snapshot's sha to see whether anything changed.
+    rule: >-
+      None. The repository has no snapshot helpers: no loadFeatureSnapshot
+      and no featuresSha (neither was ever in a released SDK). A transport that receives snapshots
+      (the snapshot client, or a custom one) decodes them itself
+      (feature-snapshot-protocol.yaml encoding.feature_snapshot.decoding) and
+      gives their features as a full set with notify(features); it uses the
+      sha the server sent, and computes none. Building snapshots and their
+      SHA belongs to a server SDK's snapshot store
+      (feature-snapshot-protocol.yaml placement).
   notifications:   # the only calls a transport needs to make
     - {call: "notify(features, list)", when: "a full set; the first makes the provider ready"}
     - {call: "notify(feature, one)", when: one feature added or updated}
@@ -980,6 +981,7 @@ featurehub_edge:
           properties:
             id: {type: string, format: uuid, description: "the environment's id"}
             features: {type: array, items: {$ref: "featurehub/feature-state"}, description: "absent means none"}
+            pollInterval: {type: integer, nullable: true, description: "the polling interval in seconds the server wants for this environment, overriding the configured one; absent or null means no override (featurehub_edge.polling.poll_interval)"}
           description: >-
             One environment's features. A GET can ask for several API keys
             at once, so the response is an array of these, one per
@@ -989,7 +991,8 @@ featurehub_edge:
         contract the SDKs rely on is specified here: the x-featurehub request
         header (request) and the extra headers (extra_headers); the sdk_version
         query parameter (sdk_version); If-None-Match,
-        ETag and 304 (etag); Cache-Control (cache_control); and the statuses
+        ETag and 304 (etag); how pollInterval is applied, and that
+        Cache-Control is not read (poll_interval); and the statuses
         it does not list - 304, every other 4xx and the 5xx (responses).
       differences:
         - "FeatureState: the definition requires only id and key; this protocol also requires version and type (encoding.feature_state.required_fields)"
@@ -1047,27 +1050,48 @@ featurehub_edge:
         NOT be kept. Otherwise a 304 for the old context's ETag would leave
         the repository with the old context's features (and, after a
         context change, waiting for a readiness that never comes).
-    cache_control:
+    poll_interval:
       rule: >-
-        If a 200 or 236 response has a Cache-Control header containing
-        max-age=<n> (the first `max-age=(\d+)` match) and n > 0, the polling
-        interval becomes n seconds, replacing the configured one, whether
-        shorter or longer. It applies to every later poll (and to passive
-        mode's freshness) until another max-age changes it; a response
-        without one leaves it as it is. A missing, zero or unparseable
-        max-age changes nothing. A max-age below the minimum interval
-        (polling_transport.interval.minimum, 5 seconds) is raised to it. With
-        a configured interval of 0 (poll once) a max-age does not start
-        polling again.
+        A 200 or 236 body's environments (FeatureEnvironmentCollection) may
+        each carry a pollInterval: the polling interval, in whole seconds, the
+        server wants for that environment. Ignore any that is absent, null, not
+        a whole number, or below 5 (polling_transport.interval.minimum is 5
+        seconds, so 5 itself is used; a value below it is ignored, not
+        raised). FeatureHub Edge itself never sends a pollInterval below 5
+        (it omits the field instead), but an SDK MUST still ignore one, as it
+        cannot know what answered its request. Of those
+        left, the smallest (the most frequent polling) becomes the polling
+        interval, replacing the configured one whether shorter or longer, for
+        every later poll and for passive mode's freshness. If none is left,
+        the configured interval applies again: removing an environment's
+        override on the server returns its clients to their configured
+        interval at their next full response. With a configured interval of
+        0 (poll once) a pollInterval does not start polling again.
+      examples:
+        - {pollIntervals: [30], configured: 60s, interval: 30s}
+        - {pollIntervals: [120], configured: 60s, interval: 120s, shows: "longer than configured is honoured"}
+        - {pollIntervals: [45, 20, null], configured: 60s, interval: 20s, shows: "several environments: the smallest"}
+        - {pollIntervals: [3, 40], configured: 60s, interval: 40s, shows: "below 5 is ignored"}
+        - {pollIntervals: [5], configured: 60s, interval: 5s, shows: "5 itself is used: it is the minimum interval"}
+        - {pollIntervals: [4, 5], configured: 60s, interval: 5s}
+        - {pollIntervals: [], configured: 60s, previous: 30s, interval: 60s, shows: "no override any more: back to the configured interval"}
+        - {pollIntervals: [30], configured: 0, interval: "none (poll once)"}
       other_responses: >-
-        max-age MUST NOT be read from any other response (304, 4xx, 5xx): a
-        failing proxy or gateway answering 503 with max-age=1 would otherwise
-        make every client poll once a second while Edge is down. Parse it
-        only once the status is known to be 200 or 236.
-      typescript_reference: >-
-        parseCacheControl: cacheHeader.match(/max-age=(\d+)/); if the parsed
-        value > 0, frequency = value * 1000 ms.
-      dart_difference: the Dart SDK matches max-age case-insensitively; TypeScript is case-sensitive
+        Only a 200 or 236 body is read. A 304 has no body and leaves the
+        interval as it is; a 4xx or 5xx (or anything between the SDK and Edge
+        answering instead) never changes it.
+      cache_control_not_read: >-
+        The Cache-Control header MUST NOT be used to change the polling
+        interval. Earlier SDKs replaced the interval with a Cache-Control
+        max-age, but FeatureHub never supported that and it is broken: every
+        SDK MUST remove that code and read pollInterval instead, whatever
+        sdk_version it sends (an SDK still sending version 1, or none,
+        included).
+        Edge still sends Cache-Control on GET responses, but it is for HTTP
+        caches (a browser, a CDN such as Fastly) and is not a signal to the
+        SDK: the two are set independently, so following it would make
+        clients poll at the cache's lifetime rather than the interval the
+        environment asks for.
       snapshot_client: "not applied: the snapshot client (your own server; feature-snapshot-protocol.yaml) polls at its configured interval and uses ETags instead"
   streaming:
     request: >-
@@ -1350,16 +1374,18 @@ conformance:
     check: "with a 1s interval and an immediate server, 4 requests are made in 3.5s (initial + 3)"
   - id: polling-from-end-of-poll
     check: "with a 1s interval and a server taking 0.6s, requests start 1.6s apart: 3 in 3s after the first response"
-  - id: polling-max-age
-    check: "a Cache-Control max-age replaces the poll interval, shorter or longer"
-  - id: polling-max-age-only-on-success
-    check: "a max-age on a 304, 429, 502 or 503 response leaves the poll interval unchanged; on a 200 or 236 it replaces it"
+  - id: polling-poll-interval
+    check: "a pollInterval replaces the poll interval, shorter or longer; with several environments the smallest of at least 5 is used; values below 5, null or absent are ignored (5 is used); a full response with none returns to the configured interval"
+  - id: polling-poll-interval-only-on-success
+    check: "a 304, 429, 502 or 503 response leaves the poll interval unchanged; a pollInterval in a 200 or 236 body replaces it"
+  - id: polling-cache-control-ignored
+    check: "a Cache-Control max-age on a 200 or 236 response (with no pollInterval) leaves the configured poll interval unchanged"
   - id: polling-zero-interval
-    check: "with an interval of 0, activePolling and passivePolling (FeatureHub and snapshot) make exactly one request, however many resolutions follow and whatever max-age says; the transport does not stop or fail"
+    check: "with an interval of 0, activePolling and passivePolling (FeatureHub and snapshot) make exactly one request, however many resolutions follow and whatever pollInterval says; the transport does not stop or fail"
   - id: polling-negative-interval
     check: "a negative poll interval is a validation error"
   - id: polling-minimum-interval
-    check: "a poll interval of 4s (or 1ms) is a validation error, for FeatureHub and snapshot polling; 5s and 0 are valid; a max-age=1 response sets the interval to 5s"
+    check: "a poll interval of 4s (or 1ms) is a validation error, for FeatureHub and snapshot polling; 5s and 0 are valid; a pollInterval of 1 (or 4) is ignored, and one of 5 is used"
   - id: edge-polling-rejection
     check: "polling FeatureHub: any 4xx notifies failure (connection_failed: readiness Failed before features, Stale after) and stops polling; a 5xx keeps polling"
   - id: edge-polling-several-environments
