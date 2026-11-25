@@ -2,7 +2,8 @@
 #
 # How a feature's rollout strategies are applied to an evaluation context, so
 # that every SDK places a user in the same bucket and matches the same
-# attributes. Used for client-evaluated API keys, raw feature snapshots, and
+# attributes. Used for client-evaluated API keys, snapshots served as
+# delivered (feature-snapshot-protocol.yaml, sendContext=false), and
 # anywhere strategies are evaluated locally.
 #
 # Paths to code, tests and fixtures are in the Dart SDK repository,
@@ -34,6 +35,7 @@ spec:
   changelog:
     - version: 1.2.0
       changes:
+        - "date-times are UTC always: a date-time without an offset is UTC, never the machine's local time, for DATE and DATETIME (supplied and values) and fhubWhenActive. A date-time string is ISO-8601 (matchers.iso_date_time); any other string, or a number, is not a date-time and never matches (the golden fixture's results are unchanged). utc_vectors cover it"
         - "date-times are compared to the second, never below: fhubWhenActive truncates both its value and the clock to the whole second, and the DATETIME matcher normalises its values to whole seconds as it already did the supplied value (matchers.DATETIME)"
         - "well_known_attributes.fhubWhenActive: a strategy attribute named fhubWhenActive holds a UTC ISO-8601 date-time and compares the clock of the machine the SDK runs on against it, using the attribute's conditional (EQUALS, NOT_EQUALS, GREATER, GREATER_EQUALS, LESS, LESS_EQUALS; any other conditional never matches) and ignoring its type; it is never taken from the context, so a strategy can switch a feature on (GREATER_EQUALS) or off (LESS) at a given moment"
     - version: 1.1.0
@@ -164,7 +166,8 @@ algorithm:
         value with fractional seconds has them dropped (it is truncated to
         the second), never rounded.
         Implementations SHOULD also accept a date-time with an explicit
-        offset, converting it to UTC.
+        offset, converting it to UTC; one without an offset is UTC (never
+        the machine's local time).
       rule: >-
         The attribute compares the clock of the machine the SDK is running
         on (UTC) against that date-time with the attribute's conditional, the
@@ -316,6 +319,20 @@ js_conversions:
 # prepared, then what each conditional means. "any" = true if at least one
 # value satisfies it; null values are dropped first.
 matchers:
+  iso_date_time:
+    description: >-
+      What DATE and DATETIME (and fhubWhenActive, which needs the time part)
+      accept as a date-time string: ISO-8601 in this form only, matched
+      case-insensitively after trimming. An SDK MUST NOT use a lenient date
+      parser (JavaScript's Date accepts "2020-06-15 10:00:00Z" and reads
+      offset-less date-times as local time): a string that does not match is
+      not a date-time.
+    pattern: '^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?)?$'
+    rules:
+      - "a date alone (YYYY-MM-DD) is midnight UTC on that date"
+      - "a date-time with Z or an offset is that instant, converted to UTC"
+      - "a date-time without Z or an offset is UTC: never the machine's local time"
+      - "a native date-time (a JavaScript Date, a Dart DateTime, ...) is its instant, in UTC"
   STRING:
     prepare: {supplied: js_to_string, values: js_to_string each}
     EQUALS: any value equals supplied
@@ -353,10 +370,12 @@ matchers:
   DATE:
     prepare:
       supplied: >-
-        Parsed as JavaScript's Date: a date-only "YYYY-MM-DD" is UTC; a
-        date-time with an offset is converted to UTC; a date-time without an
-        offset is local time. Then formatted as "YYYY-MM-DD" (UTC). Unparseable
-        -> no match.
+        A native date-time, or a string that is an ISO-8601 date or date-time
+        (iso_date_time): a date-only "YYYY-MM-DD" is midnight UTC, a
+        date-time with an offset is converted to UTC, and a date-time without
+        an offset is UTC (never the machine's local time). Then formatted as
+        "YYYY-MM-DD" (UTC). Anything else (a number, "15/06/2020", "bogus",
+        "2020-06-15 10:00:00") -> no match.
       values: js_to_string each, NOT normalised (they should already be YYYY-MM-DD)
     conditionals: as STRING, on those strings (so GREATER is lexicographic on ISO dates)
 
@@ -365,10 +384,11 @@ matchers:
       supplied: "parsed as for DATE, then formatted \"YYYY-MM-DDTHH:MM:SSZ\" (UTC, seconds; fractional seconds dropped)"
       values: >-
         js_to_string each. FeatureHub sends DATETIME values in whole seconds
-        (YYYY-MM-DDTHH:MM:SSZ). A value that parses as a date-time is
-        normalised the same way as supplied (UTC, fractional seconds
-        dropped), so date-times are compared to the second on both sides;
-        one that does not parse is used as it is
+        (YYYY-MM-DDTHH:MM:SSZ). A value that is an ISO-8601 date or
+        date-time (iso_date_time) is normalised the same way as supplied
+        (UTC, no offset meaning UTC, fractional seconds dropped), so
+        date-times are compared to the second on both sides; any other value
+        is used as it is
     conditionals: as STRING, on those strings
 
   BOOLEAN:
@@ -413,6 +433,14 @@ matchers:
     - {type: IP_ADDRESS, conditional: INCLUDES, values: ["10.0.0.0/8"], supplied: "0x0a.0.0.1", result: true, shows: "hex octet"}
     - {type: IP_ADDRESS, conditional: INCLUDES, values: ["10.0.0.0/8"], supplied: "010.0.0.1", result: false, shows: "010 is octal 8"}
     - {type: IP_ADDRESS, conditional: INCLUDES, values: ["10.0.0.0/24", "192.168.0.0/16"], supplied: "192.168.0.0/24", result: true, shows: "a supplied block"}
+
+  utc_vectors:   # not from the fixture (it is generated with TZ=UTC); run them in another time zone
+    - {type: DATETIME, conditional: EQUALS, values: ["2021-05-05T10:00:00Z"], supplied: "2021-05-05T10:00:00", result: true, shows: "no offset is UTC, whatever the machine's time zone"}
+    - {type: DATETIME, conditional: EQUALS, values: ["2021-05-05T10:00:00"], supplied: "2021-05-05T10:00:00Z", result: true, shows: "a value without an offset is UTC too"}
+    - {type: DATETIME, conditional: GREATER, values: ["2021-05-05T10:00:00Z"], supplied: "2021-05-05T10:00:01.5", result: true}
+    - {type: DATE, conditional: EQUALS, values: ["2020-06-15"], supplied: "2020-06-15T23:30:00", result: true, shows: "the same UTC date in every time zone"}
+    - {type: DATETIME, conditional: EQUALS, values: ["2021-05-05T10:00:00Z"], supplied: "2021-05-05 10:00:00Z", result: false, shows: "not ISO-8601 (a space, not T): not a date-time"}
+    - {type: DATE, conditional: EQUALS, values: ["2020-06-15"], supplied: 1592179200000, result: false, shows: "a number is not a date-time"}
 
 # ---------------------------------------------------------------------------
 # 5. The golden fixture: the conformance suite
@@ -479,7 +507,7 @@ golden_fixture:
       correct: js_conversions.strict_number; the fixture's `result` already has it
       runner: the reference runner checks `result` as for every other case
   gaps:   # behaviour the fixture does NOT exercise; test these yourself
-    - "date-times without an offset (local time): the fixture is generated with TZ=UTC"
+    - "date-times without an offset: the fixture is generated with TZ=UTC, so it cannot tell UTC from local time; matchers.utc_vectors cover them, and SHOULD be run with the time zone set to one other than UTC"
     - "native date-time values in the context (JSON has none; they are normalised to UTC like strings)"
     - "the null-values EQUALS case described under algorithm.attributes_match.note"
     - "fhubWhenActive (algorithm.well_known_attributes): the TypeScript SDK does not implement it, so the fixture has no cases; test its vectors, and a strategy with it before and after the time, with a fixed clock"

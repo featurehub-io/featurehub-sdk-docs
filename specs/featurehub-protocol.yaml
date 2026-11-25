@@ -38,6 +38,7 @@ spec:
   changelog:
     - version: 1.1.1
       changes:
+        - "featurehub_edge.polling.edge_api: the extract is of Edge OpenAPI 1.2.0, which adds sdk_version to getFeatureStates and pollInterval to FeatureEnvironmentCollection, and requires FeatureState's version and type as non-nullable, with l optional and nullable, defaulting to false (encoding.feature_state.required_fields); a decoder still skips a feature without, or with a null, version or type"
         - "featurehub_edge.polling.poll_interval replaces featurehub_edge.polling.cache_control: the server's polling interval override comes from the pollInterval field (whole seconds, nullable, optional) of each FeatureEnvironmentCollection in a 200 or 236 body, not from the Cache-Control header. Edge omits the field rather than send a value below 5, and SDKs ignore any below 5 regardless; of the environments' values of at least 5, the smallest is used; with none the configured interval applies again. SDKs MUST remove any code that reads Cache-Control max-age to change the interval (Edge still sends Cache-Control, for HTTP caches). FeatureHub never supported max-age as a polling signal and reading it is broken, so the removal is a MUST for every SDK, whatever sdk_version it sends (version 1 included)"
         - "featurehub_edge.streaming.last_event_id: SSE clients keep the last event id and send it as Last-Event-ID on reconnection (not for a new context). Edge then sends no features if nothing is new: it holds the connection (typically 60 seconds, up to 3 to 5 minutes), possibly silent, then sends bye and closes, so several reconnections may bring no updates. A bye ends a connection cleanly and resets the failure count (attempt_reset); read timeouts SHOULD exceed 5 minutes"
         - "providers.environment_variables: FEATUREHUB_CONNECT_TYPE (active, passive or streaming) and FEATUREHUB_CONNECT_INTERVAL replace FEATUREHUB_POLLING_INTERVAL and FEATUREHUB_POLLING_PASSIVE, and give the default mode and interval (mode_selection). Active and passive both need an interval, in code or from FEATUREHUB_CONNECT_INTERVAL (passive no longer defaults to 0); streaming does not use it"
@@ -54,8 +55,10 @@ spec:
         - "encoding.evaluation_context.context_sha: contextSha is defined once, with test vectors: the SHA-256 of the x-featurehub header as 64 lowercase hex characters, or 0 when there is no header (an empty header included). x_featurehub_header gains not_form_encoding, sorting and why_canonical: every SDK MUST build the same header, as the header's hash is a cache key; form encoders (space as +) and locale-aware sorting do not comply"
         - "repository.notifications.features: readiness is broadcast only when it changes (the initial Ready, and Stale -> Ready), not on every full set; repository.notifications.feature_changes: changed features have their own event, separate from readiness"
         - "rollout-strategies.yaml fhubWhenActive uses the attribute's conditional (EQUALS, NOT_EQUALS, GREATER, GREATER_EQUALS, LESS, LESS_EQUALS; any other never matches) and ignores its type"
+        - "featurehub_edge.extra_headers.precedence: If-None-Match (polling) and Last-Event-ID (streaming) are the SDK's own protocol headers, as x-featurehub is: an extra header with any of those names, in any case, is never sent"
+        - "encoding.evaluation_context.wire_value: a date-time is UTC always; rollout-strategies.yaml reads a date-time without an offset as UTC, never local time"
         - "date-times are written to the second: encoding.evaluation_context.wire_value sends a date-time as YYYY-MM-DDTHH:MM:SSZ (any fraction dropped), and fhubWhenActive is written and compared at seconds precision (rollout-strategies.yaml)"
-        - "transport.helpers: repository.loadFeatureSnapshot and repository.featuresSha are not part of the repository (they were never in a released SDK, so there is nothing to deprecate), and encoding.sha is not the repository's: the core SDK computes no SHA and builds no snapshot. The Redis store and a server SDK's snapshot store compute it (feature-snapshot-protocol.yaml 2.0.0 placement); a transport receiving snapshots decodes them itself and notifies a full set"
+        - "transport.helpers: repository.loadFeatureSnapshot and repository.featuresSha are not part of the repository (they were never in a released SDK, so there is nothing to deprecate), and encoding.sha is not the repository's: the core SDK computes no SHA of the features (only contextSha: encoding.evaluation_context.context_sha) and builds no snapshot. The Redis store and a server SDK's snapshot store compute it (feature-snapshot-protocol.yaml 2.0.0 placement); a transport receiving snapshots decodes them itself and notifies a full set"
         - "providers.default_mode replaces featurehub_edge.streaming.server_evaluated.no_default_mode: the default depends on the provider, not the key. A client-side provider polls actively at its default interval; a server-side provider streams (or polls actively with an interval), a server-evaluated key included where the SDK supports server-evaluated streaming"
     - version: 1.1.0
       changes:
@@ -94,7 +97,7 @@ encoding:
       properties:
         id: {type: string, description: "Feature value id. Unique per feature; used for sorting in the SHA."}
         key: {type: string, description: "Feature key, as used by code."}
-        l: {type: boolean, default: false, description: "Locked in its environment."}
+        l: {type: [boolean, "null"], default: false, description: "Locked in its environment. Optional: absent or null means false."}
         version: {type: integer, description: "Increases whenever the feature changes in FeatureHub. Decoders MUST accept a JSON number and truncate to integer."}
         type: {enum: [BOOLEAN, STRING, NUMBER, JSON]}
         value:
@@ -107,20 +110,22 @@ encoding:
         environmentId: {type: string, description: "Optional. Never sent by FeatureHub Edge, as the environment wrapping the features carries its id (featurehub_edge.polling.edge_api); an SDK MAY fill it in from that wrapper."}
         strategies:
           type: [array, "null"]
-          description: "Rollout strategies, in evaluation order. Present only when the receiver is to evaluate locally (client-evaluated keys, or a raw snapshot); absent, null and empty all mean none."
+          description: "Rollout strategies, in evaluation order. Present only when the receiver is to evaluate locally (client-evaluated keys, or a snapshot served as delivered: feature-snapshot-protocol.yaml encoding.snapshot_sha.form, sendContext=false); absent, null and empty all mean none."
           items: {$ref: "featurehub/rollout-strategy"}
       additionalProperties: true
     required_fields: >-
-      id, key, version and type are required. The Edge OpenAPI definition
-      (featurehub_edge.polling.edge_api) marks only id and key as required,
-      but FeatureHub Edge always sends version and type, and this protocol
-      relies on them (the update rule compares versions; a value is resolved
-      by its type). A decoder MUST skip a feature without a version or a
-      type, as an invalid feature: it is not applied, and in a full set its
-      key counts as not in the set.
+      id, key, version and type are required, and version and type are never
+      null. The Edge OpenAPI definition (featurehub_edge.polling.edge_api,
+      1.2.0 and later) requires them too, as non-nullable (l is optional
+      and nullable there: absent or null means false); earlier definitions marked only id and key as required, though Edge
+      has always sent version and type. This protocol relies on them (the
+      update rule compares versions; a value is resolved by its type). A
+      decoder MUST still skip a feature without a version or a type, or with
+      either null, as an invalid feature: it is not applied, and in a full
+      set its key counts as not in the set.
     encoding_rules:
       - Encoders SHOULD omit `value`, `v`, `fp`, `environmentId` and `strategies` when null (the Dart encoder does).
-      - Encoders MUST always write `id`, `key`, `l`, `version`, `type`.
+      - Encoders MUST always write `id`, `key`, `version`, `type`, and SHOULD write `l` (it is optional; decoders treat it as false when absent or null).
       - Decoders MUST ignore unknown properties.
 
   rollout_strategy:
@@ -233,9 +238,10 @@ encoding:
       - >-
         the well-known keys are exactly the StrategyAttributeWellKnownNames
         schema of the FeatureHub Edge OpenAPI definition
-        (currently http://api.dev.featurehub.io/edge/1.1.9.yaml, from which
+        (currently http://api.dev.featurehub.io/edge/1.2.0.yaml, from which
         featurehub_client_api is generated; currently device, country, platform, userkey,
-        session, version). They are recognised case-insensitively and
+        session, version, and fhubWhenActive, which is a strategy attribute
+        only and is dropped from the context, below). They are recognised case-insensitively and
         written lowercase; userkey is handled by the rule above. Nothing else
         (email, for example) is well-known: implementations SHOULD take the
         list from the generated model rather than keep their own copy.
@@ -252,7 +258,7 @@ encoding:
     wire_value:
       description: How each attribute value becomes a string when sent (query parameter or x-featurehub header).
       rules:
-        - "date-time: UTC ISO-8601 to the second, YYYY-MM-DDTHH:MM:SSZ (e.g. 2026-11-17T02:47:28Z); any fraction of a second is dropped (truncated, not rounded)"
+        - "date-time: UTC ISO-8601 to the second, YYYY-MM-DDTHH:MM:SSZ (e.g. 2026-11-17T02:47:28Z); any fraction of a second is dropped (truncated, not rounded). Date-times are UTC always: never the machine's local time"
         - "number: JavaScript String(n) - whole floats without a fraction (3.0 -> \"3\"), NaN -> \"NaN\", Infinity -> \"Infinity\""
         - "boolean: \"true\" / \"false\""
         - "string: as is"
@@ -449,7 +455,6 @@ repository:
         - remove every held feature whose key is not in the set (keys only asked for by code, with no feature, are kept)
         - readiness becomes Ready (from NotReady or Stale), unless the connection has failed or the environment is stale, when it stays Stale
         - "readiness is broadcast only when it changes: the initial Ready (the first full set), and Stale -> Ready (the features of a context change arriving, which waiters for the next ready wake up for). A full set that leaves readiness as it was (Ready stays Ready, as on every poll) broadcasts nothing: readiness is not a change notification (feature_changes)"
-        - recompute the SHA
     feature_changes: >-
       Changed features are told to listeners by their own event, never by
       readiness: a listener on a feature is called when that feature's value
@@ -460,10 +465,10 @@ repository:
       not from readiness.
     feature:
       payload: one feature_state
-      semantics: apply with the update rule; recompute the SHA if applied
+      semantics: apply with the update rule
     deleteFeature:
       payload: one feature_state (only key/id needed)
-      semantics: remove it (and, where catch-and-release is supported, any update for it held back); recompute the SHA
+      semantics: remove it (and, where catch-and-release is supported, any update for it held back)
     bye:
       semantics: "readiness MUST NOT change, and nothing is broadcast: the connection is being re-established, and the features held are still the latest known (Ready stays Ready, Stale stays Stale; before any features it stays NotReady). Providers report nothing and do NOT report stale; the features arrive again on reconnection, as a full set"
     failure:
@@ -838,8 +843,15 @@ featurehub_edge:
       send them with every request: each poll, and each streaming connection
       and reconnection.
     precedence: >-
-      The SDK's own protocol header wins over an extra header of the same
-      name: x-featurehub (the context, for a server-evaluated key), on both.
+      The SDK's own protocol headers win over an extra header of the same
+      name, compared case-insensitively (as HTTP header names are):
+      x-featurehub (the context, for a server-evaluated key) on both
+      transports, If-None-Match when polling (polling.etag) and
+      Last-Event-ID when streaming (streaming.last_event_id). An extra
+      header with one of those names is never sent, whether or not the SDK
+      is sending its own on that request: an application's If-None-Match
+      could pin every poll to a stale ETag (or one from another context),
+      and its Last-Event-ID could tell Edge a new context has nothing new.
       Other extra headers are sent as given.
     browsers: >-
       A browser's EventSource cannot send headers, so in a browser extra
@@ -933,9 +945,9 @@ featurehub_edge:
     edge_api:
       description: >-
         The polling request is the getFeatureStates operation of the
-        FeatureHub Edge OpenAPI definition, version 1.1.9
-        (http://api.dev.featurehub.io/edge/1.1.9.yaml; in the FeatureHub
-        repository, infra/api-bucket/files/edge/1.1.9.yaml). The extract below
+        FeatureHub Edge OpenAPI definition, version 1.2.0
+        (http://api.dev.featurehub.io/edge/1.2.0.yaml; in the FeatureHub
+        repository, infra/api-bucket/files/edge/1.2.0.yaml). The extract below
         is that operation and the schema of its response, trimmed to what the
         SDKs use; FeatureState and FeatureRolloutStrategy are
         encoding.feature_state and encoding.rollout_strategy. Edge's SSE
@@ -962,6 +974,14 @@ featurehub_edge:
               Not used by Edge. It breaks caches in front of Edge when the
               client's context changes, and MUST be present if Edge runs with
               Fastly support. The SDKs always send it (request).
+          - name: sdk_version
+            in: query
+            required: false
+            schema: {type: string}
+            description: >-
+              The Edge wire-protocol version the SDK supports (sdk_version);
+              every poll MUST send 2. Edge sends pollInterval only to 2 or
+              later. Absent means 1.
         responses:
           "200":
             description: all the environments the keys have permission to, or that were found
@@ -989,13 +1009,14 @@ featurehub_edge:
       not_in_the_definition: >-
         The definition documents only the operation itself. The rest of the
         contract the SDKs rely on is specified here: the x-featurehub request
-        header (request) and the extra headers (extra_headers); the sdk_version
-        query parameter (sdk_version); If-None-Match,
-        ETag and 304 (etag); how pollInterval is applied, and that
-        Cache-Control is not read (poll_interval); and the statuses
+        header (request) and the extra headers (extra_headers); what
+        sdk_version changes (sdk_version); If-None-Match,
+        ETag and 304 (etag); how pollInterval is applied (several
+        environments, values below 5), and that Cache-Control is not read
+        (poll_interval); and the statuses
         it does not list - 304, every other 4xx and the 5xx (responses).
       differences:
-        - "FeatureState: the definition requires only id and key; this protocol also requires version and type (encoding.feature_state.required_fields)"
+        - "FeatureState: the definition (1.2.0) requires id, key, version and type, none nullable, as this protocol does; l is optional and nullable in both, absent or null meaning false (encoding.feature_state.required_fields)"
         - "FeatureState.environmentId: never sent by Edge (the FeatureEnvironmentCollection carries the id); an SDK MAY fill it in from the collection"
         - "rollout strategies: the definition has values not nullable and attributes and percentageAttributes defaulting to []; decoders still accept null and absence for all of them (encoding.rollout_strategy.decoding_rules), which is more lenient and covers other encoders"
         - "FeatureEnvironmentCollection.features: the definition does not make it nullable; decoders accept null as none (body)"
@@ -1057,7 +1078,9 @@ featurehub_edge:
         server wants for that environment. Ignore any that is absent, null, not
         a whole number, or below 5 (polling_transport.interval.minimum is 5
         seconds, so 5 itself is used; a value below it is ignored, not
-        raised). FeatureHub Edge itself never sends a pollInterval below 5
+        raised). FeatureHub Edge sends pollInterval only to a request with
+        sdk_version 2 or later (featurehub_edge.sdk_version), which every
+        poll MUST send, and never sends one below 5
         (it omits the field instead), but an SDK MUST still ignore one, as it
         cannot know what answered its request. Of those
         left, the smallest (the most frequent polling) becomes the polling
@@ -1417,7 +1440,9 @@ conformance:
       it matches before T and not from T; with INCLUDES or EXCLUDES it never
       matches; a type other than DATETIME changes nothing; a context with
       fhubWhenActive set (to a time before T) changes nothing, and the key is
-      not in the x-featurehub header or the query parameters sent
+      not in the x-featurehub header or the query parameters sent; it is
+      compared to the second: at T plus 999ms EQUALS still matches and
+      GREATER does not, and at T plus 1s GREATER matches
   - id: when-active-combined
     check: >-
       a strategy with fhubWhenActive at T and country EQUALS nz matches a
@@ -1425,6 +1450,12 @@ conformance:
       country au; a 100% strategy with fhubWhenActive at T matches any
       user key only at or after T; neither is rejected or skipped at
       decoding or configuration
+  - id: date-time-wire-value
+    check: "a context date-time with a fraction of a second (2026-11-17T02:47:28.456Z) is sent as 2026-11-17T02:47:28Z, in the x-featurehub header and the query parameters alike, and contextSha is the SHA-256 of that header"
+  - id: date-time-utc
+    check: "with the machine's time zone set to one other than UTC (TZ=Pacific/Auckland, say), DATE and DATETIME attributes read a date-time without an offset as UTC, and a supplied string that is not ISO-8601 never matches: rollout-strategies.yaml matchers.utc_vectors"
+  - id: extra-headers-precedence
+    check: "an extra header named x-featurehub, If-None-Match or Last-Event-ID, in any case (X-FeatureHub, if-none-match, LAST-EVENT-ID), is never sent: a poll after a 304 sends the SDK's own ETag, a poll without one sends no If-None-Match, a stream for a new context sends no Last-Event-ID, and a client-evaluated key sends no x-featurehub; other extra headers are sent on every poll, connection and reconnection"
   - id: x-featurehub-encoding
     check: "encoding.evaluation_context.x_featurehub_header.examples all reproduce: keys and values are both encoded, then the encoded strings sorted"
   - id: context-sha

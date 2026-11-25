@@ -53,7 +53,8 @@ spec:
   changelog:
     - version: 2.0.0
       changes:
-        - "encoding.etag.clock_part: an evaluated snapshot's result can change with the server's clock (rollout-strategies.yaml fhubWhenActive, a fixed point in time from the attribute that the server's clock is compared against; and, separately, DATE / DATETIME attributes the context does not supply, which use the current time) with no change to the features or the context, so its ETag is \"<sha>-t<count>\": count is the number of the features' clock boundaries (encoding.clock_boundaries) at or before the server's clock. Features without any boundaries, and snapshots served as delivered (without_context), keep \"<sha>\". The sha (encoding.snapshot_sha) is unchanged and does not include the count; clients treat the ETag as opaque"
+        - "encoding.etag.clock_part: an evaluated snapshot's result can change with the server's clock (rollout-strategies.yaml fhubWhenActive, a fixed point in time from the attribute that the server's clock is compared against; and, separately, DATE / DATETIME attributes the context does not supply, which use the current time) with no change to the features or the context, so its ETag is \"<sha>_t<count>\": count is the number of the features' clock boundaries (encoding.clock_boundaries) at or before the server's clock. Features without any boundaries, and snapshots served as delivered (without_context), keep \"<sha>\". The sha (encoding.snapshot_sha) does not include the count; clients treat the ETag as opaque"
+        - "encoding.etag.format: the clock part is _t<count>, the form FeatureHub Edge's time-aware etags for server-evaluated keys use"
         - "server.snapshot_store.copy.clock_boundaries: the store works out the boundaries whenever its copy changes; feature_snapshot gives the ETag with the snapshot, and the store SHOULD offer the ETag for a context on its own for the If-None-Match check, which still needs no evaluation"
         - "placement: the core SDK MUST NOT build snapshots or compute SHAs. ClientFeatureRepository.featureSnapshot, repository.featuresSha and repository.loadFeatureSnapshot are removed (featurehub-protocol.yaml transport.helpers; none was ever in a released SDK). Only a server SDK serves snapshots, through a feature store (server.snapshot_store); everything else in the SDK stays as it is. Clients need nothing new: the snapshot client is the transport for a featuresUrl, an alternative to the FeatureHub Edge transports"
         - "server.snapshot_store: a feature store that follows the repository's raw feature updates, keeps its own copy of the features and their sha, and, for a context, asks the repository for each feature in turn (openfeature-resolution.yaml evaluation, without the interceptors step)"
@@ -244,7 +245,7 @@ encoding:
         the next second on is 2.
       rules:
         - "only for the conditionals that compare against the clock: EQUALS, NOT_EQUALS, GREATER, GREATER_EQUALS, LESS, LESS_EQUALS. With any other conditional the attribute never matches, whatever the time, so it adds nothing"
-        - "each non-null value is read as an ISO-8601 date-time with an offset, converted to UTC and truncated to the second; one that does not parse adds nothing"
+        - "each non-null value is read as an ISO-8601 date-time (rollout-strategies.yaml matchers.iso_date_time; no offset means UTC), converted to UTC and truncated to the second; one that does not match adds nothing"
     other_date_attributes:
       what_they_are: >-
         Separately, and nothing to do with fhubWhenActive: any other
@@ -254,7 +255,7 @@ encoding:
         algorithm.attributes_match). Its result can then change with the
         clock too.
       rules:
-        - "type DATETIME: each non-null value parsed as an ISO-8601 date-time with an offset and truncated to the second; boundaries: that second and the next (the DATETIME matcher compares at seconds precision: rollout-strategies.yaml matchers.DATETIME)"
+        - "type DATETIME: each non-null value parsed as an ISO-8601 date or date-time (rollout-strategies.yaml matchers.iso_date_time; no offset means UTC) and truncated to the second; boundaries: that second and the next (the DATETIME matcher compares at seconds precision: rollout-strategies.yaml matchers.DATETIME)"
         - "type DATE: each non-null value as a YYYY-MM-DD date (an offset, if present, is ignored); boundaries: midnight UTC at the start of that date and of the next day (the DATE matcher compares the UTC date)"
         - "a value that does not parse adds nothing"
       why_all_of_them: >-
@@ -277,14 +278,14 @@ encoding:
       The snapshot's sha (snapshot_sha) in double quotes, a strong entity
       tag: "<sha>" when the snapshot carries strategies (server.evaluation.without_context)
       or its features have no clock boundaries (clock_boundaries), and
-      otherwise "<sha>-t<count>" with count as clock_boundaries.count, in
+      otherwise "<sha>_t<count>" with count as clock_boundaries.count, in
       decimal.
     examples:
       - '"5da6ce2616ad4cb03d94d3308a7557f2805d2de9624a63985ab267e449641876"'
-      - '"5da6ce2616ad4cb03d94d3308a7557f2805d2de9624a63985ab267e449641876-t2"'
+      - '"5da6ce2616ad4cb03d94d3308a7557f2805d2de9624a63985ab267e449641876_t2"'
     clock_part: >-
       The count is outside the sha: encoding.snapshot_sha, the body's sha
-      and its test vectors are unchanged, and only the ETag carries it.
+      and their test vectors do not include it; only the ETag carries it.
       It is present whenever the features have boundaries, t0 included,
       so the form of a snapshot's ETag does not depend on the time.
       Clients treat the ETag as opaque and MUST NOT parse it.
@@ -309,21 +310,21 @@ encoding:
       fhub_when_active:   # T = 2026-12-01T09:00:00Z, from the attribute; the context plays no part in it
         features: "f1 has one strategy: fhubWhenActive GREATER_EQUALS [\"2026-12-01T09:00:00Z\"]; f2 has none"
         vectors:
-          - {context: {country: nz}, clock: "2026-12-01T08:59:59Z", etag: '"5da6ce2616ad4cb03d94d3308a7557f2805d2de9624a63985ab267e449641876-t0"', shows: "before T"}
-          - {context: {country: nz}, clock: "2026-12-01T09:00:00Z", etag: '"5da6ce2616ad4cb03d94d3308a7557f2805d2de9624a63985ab267e449641876-t1"', shows: "at T"}
-          - {context: {country: nz}, clock: "2026-12-01T09:00:00.999Z", etag: '"5da6ce2616ad4cb03d94d3308a7557f2805d2de9624a63985ab267e449641876-t1"', shows: "still T's second"}
-          - {context: {country: nz}, clock: "2026-12-01T09:00:01Z", etag: '"5da6ce2616ad4cb03d94d3308a7557f2805d2de9624a63985ab267e449641876-t2"', shows: "after T"}
-          - {context: {country: nz, fhubWhenActive: "2020-01-01T00:00:00Z"}, clock: "2026-12-01T08:59:59Z", etag: '"5da6ce2616ad4cb03d94d3308a7557f2805d2de9624a63985ab267e449641876-t0"', shows: "a context key named fhubWhenActive is dropped (featurehub-protocol.yaml encoding.evaluation_context), so neither the sha nor the count changes"}
-          - {context: {country: nz}, clock: "2027-01-01T00:00:00Z", etag: '"5da6ce2616ad4cb03d94d3308a7557f2805d2de9624a63985ab267e449641876-t2"', shows: "stable after the time"}
-          - {context: {}, form: sendContext=true, clock: "2026-12-01T09:00:00Z", etag: '"2eb34db18f7d62cee6c8dd3aa234034598a667982b8d9831bee7bba2c4c33852-t1"', shows: "no context, evaluated: the count still applies"}
+          - {context: {country: nz}, clock: "2026-12-01T08:59:59Z", etag: '"5da6ce2616ad4cb03d94d3308a7557f2805d2de9624a63985ab267e449641876_t0"', shows: "before T"}
+          - {context: {country: nz}, clock: "2026-12-01T09:00:00Z", etag: '"5da6ce2616ad4cb03d94d3308a7557f2805d2de9624a63985ab267e449641876_t1"', shows: "at T"}
+          - {context: {country: nz}, clock: "2026-12-01T09:00:00.999Z", etag: '"5da6ce2616ad4cb03d94d3308a7557f2805d2de9624a63985ab267e449641876_t1"', shows: "still T's second"}
+          - {context: {country: nz}, clock: "2026-12-01T09:00:01Z", etag: '"5da6ce2616ad4cb03d94d3308a7557f2805d2de9624a63985ab267e449641876_t2"', shows: "after T"}
+          - {context: {country: nz, fhubWhenActive: "2020-01-01T00:00:00Z"}, clock: "2026-12-01T08:59:59Z", etag: '"5da6ce2616ad4cb03d94d3308a7557f2805d2de9624a63985ab267e449641876_t0"', shows: "a context key named fhubWhenActive is dropped (featurehub-protocol.yaml encoding.evaluation_context), so neither the sha nor the count changes"}
+          - {context: {country: nz}, clock: "2027-01-01T00:00:00Z", etag: '"5da6ce2616ad4cb03d94d3308a7557f2805d2de9624a63985ab267e449641876_t2"', shows: "stable after the time"}
+          - {context: {}, form: sendContext=true, clock: "2026-12-01T09:00:00Z", etag: '"2eb34db18f7d62cee6c8dd3aa234034598a667982b8d9831bee7bba2c4c33852_t1"', shows: "no context, evaluated: the count still applies"}
           - {context: {}, form: sendContext=false, clock: "2026-12-01T09:00:00Z", etag: '"e17b012d96433267fa3dc02316845226adbdb7d82bcb69f987617f178be3f482"', shows: "served as delivered: another sha, and no count"}
       other_date_attributes:   # no fhubWhenActive; the context supplies neither attribute, so the current time is used
         features: "f1 has one strategy with two attributes: launch DATE GREATER [\"2026-12-01\"] and expires DATETIME LESS [\"2026-12-01T09:00:00Z\"]; f2 has none"
         boundaries: ["2026-12-01T00:00:00Z", "2026-12-01T09:00:00Z", "2026-12-01T09:00:01Z", "2026-12-02T00:00:00Z"]
         vectors:
-          - {context: {country: nz}, clock: "2026-11-30T23:59:59Z", etag: '"5da6ce2616ad4cb03d94d3308a7557f2805d2de9624a63985ab267e449641876-t0"'}
-          - {context: {country: nz}, clock: "2026-12-01T09:00:00.999Z", etag: '"5da6ce2616ad4cb03d94d3308a7557f2805d2de9624a63985ab267e449641876-t2"', shows: "DATETIME at seconds precision"}
-          - {context: {country: nz}, clock: "2026-12-02T00:00:00Z", etag: '"5da6ce2616ad4cb03d94d3308a7557f2805d2de9624a63985ab267e449641876-t4"'}
+          - {context: {country: nz}, clock: "2026-11-30T23:59:59Z", etag: '"5da6ce2616ad4cb03d94d3308a7557f2805d2de9624a63985ab267e449641876_t0"'}
+          - {context: {country: nz}, clock: "2026-12-01T09:00:00.999Z", etag: '"5da6ce2616ad4cb03d94d3308a7557f2805d2de9624a63985ab267e449641876_t2"', shows: "DATETIME at seconds precision"}
+          - {context: {country: nz}, clock: "2026-12-02T00:00:00Z", etag: '"5da6ce2616ad4cb03d94d3308a7557f2805d2de9624a63985ab267e449641876_t4"'}
       no_boundaries:
         features: "f1 has two strategies: country EQUALS [nz], and fhubWhenActive INCLUDES [\"2026-12-01T09:00:00Z\"] (never matches, so no boundaries); f2 has none"
         vectors:
@@ -360,7 +361,7 @@ server:
         - split the header value on ","
         - trim each tag
         - strip a leading "W/" (weak comparison)
-        - it matches if any tag is "*" or equals the current ETag exactly (quotes included, and the -t<count> part with it: a tag with only the sha, or another count, does not match)
+        - it matches if any tag is "*" or equals the current ETag exactly (quotes included, and the _t<count> part with it: a tag with only the sha, or another count, does not match)
       on_match: '304 Not Modified, empty body, headers ETag and Cache-Control: no-cache'
       check_order: >-
         The If-None-Match check MAY happen before evaluating the context: the
@@ -418,7 +419,7 @@ server:
     responses:
       - status: 200
         when: features served
-        headers: {Content-Type: application/json, ETag: 'encoding.etag ("<sha>" or "<sha>-t<count>")', Cache-Control: no-cache}
+        headers: {Content-Type: application/json, ETag: 'encoding.etag ("<sha>" or "<sha>_t<count>")', Cache-Control: no-cache}
         body: encoding.feature_snapshot
       - status: 304
         when: If-None-Match matches
