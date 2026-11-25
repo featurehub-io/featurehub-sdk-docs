@@ -12,7 +12,7 @@ test vectors; the reference implementation is the Dart SDK,
 | Specification | Covers |
 |---|---|
 | [`featurehub-protocol.yaml`](specs/featurehub-protocol.yaml) | The FeatureHub protocol as the SDKs use it: the feature JSON and its SHA, the evaluation context, polling scheduling, the repository, the transport contract, provider wiring, and FeatureHub Edge polling and streaming (statuses, stale environments, reconnection) |
-| [`feature-snapshot-protocol.yaml`](specs/feature-snapshot-protocol.yaml) | Your own server re-serving features to its own clients (snapshots, ETags, the server's `includeStrategies` choice), and the snapshot client. Built on `featurehub-protocol.yaml` |
+| [`feature-snapshot-protocol.yaml`](specs/feature-snapshot-protocol.yaml) | Your own server re-serving features to its own clients: the server SDK's snapshot store (never the core SDK), snapshots and their context-aware sha and ETag, the server's `includeStrategies` choice, and the snapshot client. Built on `featurehub-protocol.yaml` |
 | [`rollout-strategies.yaml`](specs/rollout-strategies.yaml) | Rollout strategy evaluation: percentage rollouts (murmur3) and the attribute matchers, with the TypeScript SDK's golden fixture ([`specs/fixtures/typescript_golden.json`](specs/fixtures/typescript_golden.json)) as the conformance suite |
 | [`openfeature-resolution.yaml`](specs/openfeature-resolution.yaml) | How an OpenFeature provider resolves a flag: interceptors, type conversion, reasons, variants, error codes and flag metadata |
-| [`feature-store.yaml`](specs/feature-store.yaml) | Feature stores (browser storage, Redis, local YAML): the store contract, how the repository treats store features, and the shared storage formats |
+| [`feature-store.yaml`](specs/feature-store.yaml) | Feature stores (browser storage, Redis, local YAML, and the server SDK's snapshot store): the store contract, how the repository treats store features, and the shared storage formats |

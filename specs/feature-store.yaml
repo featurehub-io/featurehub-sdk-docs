@@ -19,21 +19,28 @@
 #   featurehub-openfeatures-store-redis         (RedisFeatureStore)
 #   featurehub-openfeatures-yaml-interceptor    (LocalYamlFeatureStore,
 #                                                LocalYamlValueInterceptor)
+#   featurehub-openfeatures-server-sdk          (FeatureSnapshotStore; specified
+#                                                in feature-snapshot-protocol.yaml)
 # The local storage and Redis formats match the FeatureHub TypeScript SDK.
 #
 # MUST / SHOULD / MAY as in RFC 2119.
 
 spec:
   name: featurehub-feature-store
-  version: 1.0.0
-  status: implemented-in-dart
+  version: 1.1.0
+  status: implemented-in-dart (the snapshot store is specified, not yet implemented)
   changelog:
+    - version: 1.1.0
+      changes:
+        - "snapshot_store: a server SDK's snapshot store is a feature store that supplies no features and follows the repository's raw feature updates to build snapshots (feature-snapshot-protocol.yaml server.snapshot_store); raw_feature_updates.sources gains snapshot-store"
+        - "redis_store: computes the SHA itself; the repository no longer keeps one (featurehub-protocol.yaml encoding.sha)"
     - version: 1.0.0
       changes:
         - "First published version."
   related:
     encoding: featurehub-protocol.yaml encoding (FeatureState JSON, the SHA)
     resolution: openfeature-resolution.yaml (interceptors never create flags)
+    snapshots: feature-snapshot-protocol.yaml (the snapshot store, a server SDK's store that serves snapshots)
 
 # ---------------------------------------------------------------------------
 # Catch-and-release: an optional feature
@@ -115,6 +122,7 @@ raw_feature_updates:
     local-session-store: the browser storage store
     redis-store: the Redis store
     local-yaml-store: the YAML store
+    snapshot-store: "the snapshot store (feature-snapshot-protocol.yaml server.snapshot_store); never seen, as it never notifies"
   events:
     FeaturesReceived: {fields: [features, source], meaning: "a complete set, replacing all previous features"}
     FeatureReceived: {fields: [feature, source], meaning: "one feature added or changed"}
@@ -212,7 +220,7 @@ redis_store:
   serialisation: all Redis operations for a store run one at a time, in order
   on_update:   # events from other sources
     FeaturesReceived:
-      - compute the incoming SHA; if it equals the stored sha, do nothing
+      - compute the incoming SHA (the store computes it; the repository keeps none); if it equals the stored sha, do nothing
       - "if Redis has features and none of the incoming is newer (by id, version), do nothing"
       - otherwise write the incoming features
       - "note: as in the TypeScript SDK, a full set that only removes features (nothing newer) is not written"
@@ -308,7 +316,21 @@ yaml:
       - "a feature keeps the type it was loaded with; an edit implying another type is converted to the original type"
 
 # ---------------------------------------------------------------------------
-# 7. Conformance checks (each is a test in the reference implementation)
+# 7. Snapshot store (server SDKs)
+# ---------------------------------------------------------------------------
+snapshot_store:
+  platform: "server SDKs only (Dart: featurehub-openfeatures-server-sdk); never in the core SDK"
+  source: snapshot-store
+  summary: >-
+    Supplies no features: attach seeds a copy from the features the
+    repository already holds and follows raw feature updates (every source,
+    other stores included), keeping the features as delivered and their SHA,
+    from which it builds snapshots for your own server's clients. Refuses to
+    attach for a server-evaluated key, as the Redis store does.
+  specified_in: feature-snapshot-protocol.yaml server.snapshot_store
+
+# ---------------------------------------------------------------------------
+# 8. Conformance checks (each is a test in the reference implementation)
 # ---------------------------------------------------------------------------
 conformance:
   - {id: own-source-ignored, check: "a store's own loaded features are not written back"}
