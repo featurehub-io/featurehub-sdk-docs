@@ -601,7 +601,7 @@ client:
     url: {required: true, description: "Full URL of the endpoint; may already have query parameters."}
     send_context: {default: "true for app/browser (client) providers, false for server providers", description: "Send the repository's context as query parameters."}
     headers: {default: {}, description: "Sent with every request (gateway keys, auth, tracing)."}
-    interval: {description: "Poll interval; also how long a response stays fresh."}
+    interval: {description: "Poll interval; also how long a response stays fresh. 0 or at least 5 seconds (featurehub-protocol.yaml polling_transport.interval.minimum), or any value above 0 in test mode (featurehub-protocol.yaml polling_transport.interval.test_mode)."}
     request_timeout: {default: none, description: "Whole-request limit; exceeding it is an error (retried)."}
     connect_timeout: {default: none, description: "Only for an HTTP client the SDK creates."}
     http_client: {default: created, description: "Injectable (e.g. configured with a proxy)."}

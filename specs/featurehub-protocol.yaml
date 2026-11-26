@@ -42,6 +42,7 @@ spec:
         - "providers.initialisation: Ready succeeds; Failed is PROVIDER_FATAL; Stale with the connection stopped (it stopped with the first features) succeeds, with STALE after READY; anything else at the deadline, a context change in progress included, is ERROR (GENERAL). providers.stale_source: STALE comes from the connection events, never from readiness"
         - "featurehub_edge.polling.edge_api: the extract is of Edge OpenAPI 1.2.0, which adds sdk_version to getFeatureStates and pollInterval to FeatureEnvironmentCollection, and requires FeatureState's version and type as non-nullable, with l optional and nullable, defaulting to false (encoding.feature_state.required_fields); a decoder still skips a feature without, or with a null, version or type"
         - "featurehub_edge.polling.poll_interval replaces featurehub_edge.polling.cache_control: the server's polling interval override comes from the pollInterval field (whole seconds, nullable, optional) of each FeatureEnvironmentCollection in a 200 or 236 body, not from the Cache-Control header. Edge omits the field rather than send a value below 5, and SDKs ignore any below 5 regardless; of the environments' values of at least 5, the smallest is used; with none the configured interval applies again. SDKs MUST remove any code that reads Cache-Control max-age to change the interval (Edge still sends Cache-Control, for HTTP caches). FeatureHub never supported max-age as a polling signal and reading it is broken, so the removal is a MUST for every SDK, whatever sdk_version it sends (version 1 included)"
+        - "polling_transport.interval.test_mode: FEATUREHUB_TEST_POLLING=true is test mode, for test processes only: any poll interval above 0 is allowed (500ms, say), in code, in FEATUREHUB_CONNECT_INTERVAL and for the snapshot client, and a FeatureHub pollInterval of at least 1 second is used. It is the only way the minimum may be lowered outside an SDK's own tests (providers.environment_variables.names.test)"
         - "featurehub_edge.streaming.last_event_id: SSE clients keep the last event id and send it as Last-Event-ID on reconnection (not for a new context). Edge then sends no features if nothing is new: it holds the connection (typically 60 seconds, up to 3 to 5 minutes), possibly silent, then sends bye and closes, so several reconnections may bring no updates. A bye ends a connection cleanly and resets the failure count (attempt_reset); read timeouts SHOULD exceed 5 minutes"
         - "providers.environment_variables: FEATUREHUB_CONNECT_TYPE (active, passive or streaming) and FEATUREHUB_CONNECT_INTERVAL replace FEATUREHUB_POLLING_INTERVAL and FEATUREHUB_POLLING_PASSIVE, and give the default mode and interval (mode_selection). Active and passive both need an interval, in code or from FEATUREHUB_CONNECT_INTERVAL (passive no longer defaults to 0); streaming does not use it"
         - "providers.environment_variables.durations.connect_interval: FEATUREHUB_CONNECT_INTERVAL is a single number followed by a time unit (ms, s, m, h), and is 0 (connect once and stop) or at least 5 seconds"
@@ -360,12 +361,37 @@ polling_transport:
       FeatureHub pollInterval below 5 seconds is ignored
       (featurehub_edge.polling.poll_interval; the server is not
       configuration, so it is not an error). An SDK MAY lower the
-      minimum for its own tests, but MUST NOT let applications lower it (Go:
+      minimum for its own tests, but MUST NOT let applications lower it,
+      except through test mode (test_mode) (Go:
       core.MinPollingInterval, read from an internal package that only the
       SDK's tests can change; Dart: minPollingInterval in
       featurehub_openfeatures_common's lib/src/transport/polling_limits.dart,
       which is not exported, so only a direct import of the src file, which
       the analyzer warns about, can change it).
+    test_mode:
+      description: >-
+        EXPLICITLY FOR TEST MODE ONLY: for test processes (an end-to-end or
+        integration suite) that cannot wait 5 seconds for each poll. Never
+        for production: it lets a configuration poll a server as often as it
+        likes, which is what the minimum exists to prevent.
+      enabled_by: >-
+        The environment variable FEATUREHUB_TEST_POLLING
+        (providers.environment_variables.names.test) set to true, compared
+        case-insensitively after trimming. Unset, or any other value, is off;
+        it is never a validation error. It is read once, when the SDK starts.
+        Only server-side SDKs read it, as with every other variable
+        (providers.environment_variables); a client-side SDK MAY offer its own
+        test-only switch, which MUST NOT be documented for applications.
+      effect:
+        - "any interval above 0 is allowed (500ms, say): in code, in FEATUREHUB_CONNECT_INTERVAL (environment_variables.durations.connect_interval), for FeatureHub polling and the snapshot client, active and passive alike"
+        - "0 still polls once (zero_polls_once), and a negative interval is still a validation error"
+        - "a FeatureHub pollInterval (featurehub_edge.polling.poll_interval) of at least 1 second is used instead of at least 5"
+        - "nothing else changes: streaming and its timings are not affected"
+      warning: "an SDK SHOULD log a warning when test mode is on, saying the poll interval minimum is off"
+      documentation: >-
+        An SDK MUST NOT document FEATUREHUB_TEST_POLLING for applications
+        (its README, guides or examples): this specification is where it is
+        described. Code comments and the SDK's own tests may name it.
     negative: a negative interval is a validation error (providers.validation_errors)
     absent: >-
       Where an interval is required (the server provider polling, and
@@ -658,7 +684,7 @@ providers:
     - "a server-side provider, in an SDK that does not support server-evaluated streaming, with a server-evaluated key (no '*'), no mode (in code or the environment), no interval and no transportFactory: its default, streaming, is not available, so the mode must be given (default_mode)"
     - "nothing to get features from (no host+apiKey, featuresUrl, transportFactory or stores)"
     - "server provider: activePolling or passivePolling without a pollInterval (0 is a valid interval: poll once, polling_transport.interval.zero_polls_once)"
-    - "a negative pollInterval, or one between 0 and 5 seconds (activePolling or passivePolling, FeatureHub or your own server; polling_transport.interval.minimum)"
+    - "a negative pollInterval, or one between 0 and 5 seconds (activePolling or passivePolling, FeatureHub or your own server; polling_transport.interval.minimum), unless test mode is on (polling_transport.interval.test_mode)"
   default_mode:
     description: >-
       The mode a provider uses when none is given, in code or (server-side)
@@ -733,7 +759,9 @@ providers:
           FEATUREHUB_CONNECT_INTERVAL takes the grammar above, and is 0,
           meaning connect once and stop (polling_transport.interval.zero_polls_once),
           or at least 5 seconds (polling_transport.interval.minimum). Anything
-          between 0 and 5 seconds (such as 3s or 500ms) is a validation error.
+          between 0 and 5 seconds (such as 3s or 500ms) is a validation error,
+          unless test mode is on (polling_transport.interval.test_mode), when
+          any duration above 0 is allowed.
         valid: ["0", "0s", "5s", "30s", "5000ms", "1.5m", "1h"]
         invalid: ["30", "3s", "500ms", "1m30s", "-30s", "30 s", "ten"]
     names:
@@ -754,6 +782,8 @@ providers:
         FEATUREHUB_SSE_BACKOFF_MULTIPLIER: "number, at least 1: how much the wait grows after each consecutive failure"
       local_overrides:
         FEATUREHUB_LOCAL_YAML: "as feature-store.yaml defines it"
+      test:
+        FEATUREHUB_TEST_POLLING: "true or unset. EXPLICITLY FOR TEST MODE ONLY, never production, and never documented for applications: true allows any poll interval above 0 (polling_transport.interval.test_mode)"
     other_names: >-
       An SDK MAY read further variables for settings of its own. They MUST
       start with FEATUREHUB_, use FEATUREHUB_POLLING_ or FEATUREHUB_SSE_ for
@@ -1126,7 +1156,8 @@ featurehub_edge:
         server wants for that environment. Ignore any that is absent, null, not
         a whole number, or below 5 (polling_transport.interval.minimum is 5
         seconds, so 5 itself is used; a value below it is ignored, not
-        raised). FeatureHub Edge sends pollInterval only to a request with
+        raised). In test mode (polling_transport.interval.test_mode) the
+        floor is 1 instead of 5. FeatureHub Edge sends pollInterval only to a request with
         sdk_version 2 or later (featurehub_edge.sdk_version), which every
         poll MUST send, and never sends one below 5
         (it omits the field instead), but an SDK MUST still ignore one, as it
@@ -1589,6 +1620,14 @@ conformance:
       FEATUREHUB_CONNECT_INTERVAL accepts 0, 0s, 5s, 30s, 5000ms, 1.5m and
       1h; 30, 3s, 500ms, 1m30s, -30s, "30 s" and ten are validation errors,
       in every server-side SDK
+  - id: environment-test-polling
+    check: >-
+      with FEATUREHUB_TEST_POLLING=true, a poll interval of 500ms (in code
+      and as FEATUREHUB_CONNECT_INTERVAL=500ms) is allowed and polls at
+      that interval, for FeatureHub polling and the snapshot client, and a
+      FeatureHub pollInterval of 1 is used; a negative interval is still a
+      validation error. Unset, false, or yes leaves the 5 second minimum in
+      place
   - id: environment-legacy-names
     check: >-
       an existing SDK reads its legacy mode and interval variables as before
