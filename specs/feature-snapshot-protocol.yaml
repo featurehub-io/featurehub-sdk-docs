@@ -27,19 +27,16 @@
 # https://github.com/featurehub-io/featurehub-flutter-sdk, unless another
 # repository is named.
 #
-# Reference implementation: the Dart SDK. Version 2.0.0 moves the server
-# side out of the core; until the Dart SDK follows, it has (1.0.0)
-#   featurehub-openfeatures-common (lib/src/feature_snapshot.dart,
-#   lib/src/transport/snapshot_transport.dart,
-#   ClientFeatureRepository.featureSnapshot and featuresSha in
-#   lib/src/repository.dart), and
-#   the server example featurehub-openfeatures-server-sdk/example/main.dart
-#   (GET /features).
-# Where 2.0.0 puts them: the snapshot client stays a transport in
-# featurehub-openfeatures-common; the snapshot store (server.snapshot_store),
-# the snapshot's sha and its encoding go to featurehub-openfeatures-server-sdk;
-# the repository loses featureSnapshot, featuresSha and loadFeatureSnapshot
-# (none of them was ever in a released SDK).
+# Reference implementation: the Dart SDK. The snapshot client and the
+#   snapshot reader stay in featurehub-openfeatures-common
+#   (lib/src/transport/snapshot_transport.dart, lib/src/feature_snapshot.dart);
+#   the snapshot store, the snapshot's sha and the features' SHA are in
+#   featurehub-openfeatures-server-sdk (lib/src/feature_snapshot_store.dart,
+#   lib/src/features_sha.dart), and the server example
+#   featurehub-openfeatures-server-sdk/example/main.dart serves GET /features
+#   from a FeatureSnapshotStore. The repository has no featureSnapshot,
+#   featuresSha or loadFeatureSnapshot (none of them was ever in a released
+#   SDK).
 #
 # Conventions: MUST / SHOULD / MAY as in RFC 2119. "repository" is the local
 # in-memory store of features that resolutions read from. "core SDK" is the
@@ -53,7 +50,7 @@
 spec:
   name: feature-snapshot-protocol
   version: 2.0.0
-  status: specified; the Dart SDK implements 1.0.0
+  status: implemented-in-dart
   changelog:
     - version: 2.0.0
       changes:
