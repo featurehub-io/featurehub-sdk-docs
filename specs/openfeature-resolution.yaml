@@ -27,6 +27,7 @@ spec:
     - version: 1.1.0
       changes:
         - "tracking: OpenFeature's track(name, context, details) records a FeatureHub named usage event, from a context of its own, for the usage plugins; it never fails the caller"
+        - "resolution.before_evaluation: during a context change of a provider that sends the context (featurehub-protocol.yaml providers.context_change.single_context), an asynchronous provider waits, and after waitForReady returns PROVIDER_NOT_READY; a synchronous one returns the previous context's value with the reason STALE, and after waitForReady PROVIDER_NOT_READY. Never the previous context's value as the new one's usual result. Once the source has stopped for good, a context other than the one whose features are held gets PROVIDER_NOT_READY"
     - version: 1.0.0
       changes:
         - "First published version."
@@ -102,7 +103,11 @@ resolution:
   before_evaluation:
     - {when: "the provider has not finished initialising", value: code default, reason: ERROR, error_code: PROVIDER_NOT_READY}
     - {when: "initialisation failed (the source rejected us before any features)", value: code default, reason: ERROR, error_code: PROVIDER_FATAL}
-    - {when: "the provider is stale (its source stopped for good after features)", value: "resolved normally from the last features", reason: "the usual reasons (not ERROR, not STALE)"}
+    - {when: "the provider is stale (its source stopped for good after features)", value: "resolved normally from the last features; for a provider that sends the context, only for the context they belong to", reason: "the usual reasons (not ERROR, not STALE)"}
+    - {when: "the provider is stale, sends the context, and the context is not the one whose features are held (featurehub-protocol.yaml providers.context_change.single_context.stopped_for_good)", value: code default, reason: ERROR, error_code: PROVIDER_NOT_READY}
+    - {when: "a context change is in progress and the provider's resolutions are asynchronous (featurehub-protocol.yaml providers.context_change.single_context)", value: "the resolution waits, up to waitForReady, for the new context's features, then is resolved from them; if they have not arrived, code default", reason: "the usual reasons; or ERROR, error_code PROVIDER_NOT_READY"}
+    - {when: "a context change is in progress, the provider's resolutions are synchronous, and waitForReady has not passed since it started", value: "resolved from the previous context's features", reason: "STALE, unless the result is an error (then as usual); variant and flag metadata as usual"}
+    - {when: "a context change is in progress, the provider's resolutions are synchronous, and waitForReady has passed since it started", value: code default, reason: ERROR, error_code: PROVIDER_NOT_READY}
     - {when: "the evaluation context is invalid", value: code default, reason: ERROR, error_code: INVALID_CONTEXT}
     - {when: "an unexpected error while evaluating", value: code default, reason: ERROR, error_code: GENERAL}
   steps:   # applied in order; the first that applies decides
