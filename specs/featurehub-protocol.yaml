@@ -32,10 +32,21 @@
 
 spec:
   name: featurehub-protocol
-  version: 1.1.1
+  version: 1.1.2
   sdk_version: 2
   status: implemented-in-dart
   changelog:
+    - version: 1.1.2
+      changes:
+        - "featurehub_edge.sdk_version.generations: a request without sdk_version is generation 1. Edge honours Last-Event-ID, and holds quiet connections, only for sdk_version 2 or more; generation 1 always gets the full features on every connection. An SDK sends 2 only if it implements streaming.last_event_id in full, short_connections included"
+        - "featurehub_edge.query_parameters: the SDK's query parameters come in a fixed order, contextSha, sdk_version, then xfeaturehub (after the apiKey parameters when polling), so equal requests have equal URLs for a CDN. Streaming now sends contextSha too"
+        - "featurehub_edge.streaming.last_event_id.short_connections: a connection that ends less than 10 seconds after its request was sent, with a bye or without, is a failure (a cache in front of Edge replaying a closed stream), and nothing it delivers resets the failure count; consecutive ones SHOULD be logged as a likely cache misconfiguration. In browsers, without a maximum number of attempts, short connections keep backing off up to the maximum delay"
+        - "providers.environment_variables.durations: every duration variable uses one strict grammar (a single number and a lowercase unit, ms, s, m or h, or 0), not Go's time.ParseDuration; compound values such as 1m30s are not accepted"
+        - "providers.environment_variables.legacy_names: only new SDKs (Dart and Go) implement this specification, and they read none of the legacy names"
+        - "featurehub_edge.streaming.last_event_id.quiet_connections: an SDK SHOULD warn about a read timeout of 5 minutes or less (it was: less than 5 minutes)"
+        - "repository.environment_stale: the SDK SHOULD log a warning, once, when the environment becomes stale (236 or edge.stale)"
+        - "providers.default_mode replaces featurehub_edge.streaming.server_evaluated.no_default_mode: a server-evaluated key defaults to streaming in an SDK that supports server-evaluated streaming (it is a validation error without a mode only in one that does not). Client-side SDKs choose their own default and document it: Dart's client provider polls passively"
+        - "providers.context_change.single_context: a provider that sends the context (a server-evaluated key, or sendContext) has exactly one active context, in every SDK. A context change blocks every resolution until the new context's features arrive, and no resolution is answered from the previous context's features as the new one's: asynchronous resolutions wait (up to waitForReady, then PROVIDER_NOT_READY, and the next waits again); synchronous ones return the previous context's values with the reason STALE until waitForReady has passed, then PROVIDER_NOT_READY. Once the source has stopped for good, the last features serve only the context they belong to; any other gets PROVIDER_NOT_READY (it previously got the last features)"
     - version: 1.1.1
       changes:
         - "featurehub_edge.streaming.last_event_id: SSE clients keep the last event id and send it as Last-Event-ID on reconnection (not for a new context). Edge then sends no features if nothing is new: it holds the connection (typically 60 seconds, up to 3 to 5 minutes), possibly silent, then sends bye and closes, so several reconnections may bring no updates. A bye ends a connection cleanly and resets the failure count (attempt_reset); read timeouts SHOULD exceed 5 minutes"
@@ -44,11 +55,6 @@ spec:
         - "providers.environment_variables.applies_to: environment variables apply only to server-side SDKs (Go, Python, Ruby, Dart's featurehub-openfeatures-server); client-side SDKs do not read them"
         - "providers.environment_variables.legacy_names: existing SDKs keep their legacy variables as they read them today, used only when neither new variable is set; the JavaScript millisecond exception now applies only to its legacy FEATUREHUB_POLLING_INTERVAL"
         - "featurehub_edge.sdk_version replaces featurehub_edge.sdk_identification: the sdk and version query parameters are dropped, and polling (activePolling and passivePolling) and streaming MUST send sdk_version=2 (spec.sdk_version, the protocol generation this specification defines; it changes only when the wire protocol to Edge changes, not with minor or patch releases of this specification). Every SDK that adheres to this specification sends the same URL, so a CDN in front of Edge is not fragmented by SDK, language or release"
-        - "featurehub_edge.sdk_version.generations: a request without sdk_version is generation 1. Edge honours Last-Event-ID, and holds quiet connections, only for sdk_version 2 or more; generation 1 always gets the full features on every connection"
-        - "featurehub_edge.query_parameters: the SDK's query parameters come in a fixed order, contextSha, sdk_version, then xfeaturehub (after the apiKey parameters when polling), so equal requests have equal URLs for a CDN. Streaming now sends contextSha too"
-        - "featurehub_edge.streaming.last_event_id.short_connections: a connection that ends less than 10 seconds after it opened, with a bye or without, is a failure (a cache in front of Edge replaying a closed stream), and nothing it delivers resets the failure count; consecutive ones SHOULD be logged as a likely cache misconfiguration"
-        - "providers.environment_variables.durations: every duration variable uses one strict grammar (a single number and a lowercase unit, ms, s, m or h, or 0), not Go's time.ParseDuration; compound values such as 1m30s are not accepted"
-        - "providers.environment_variables.legacy_names: only new SDKs (Dart and Go) implement this specification, and they read none of the legacy names"
     - version: 1.1.0
       changes:
         - "featurehub_edge.sdk_identification: polling (activePolling and passivePolling) and streaming MUST send sdk (the SDK's name/language) and version (the SDK's version) query parameters on every request to Edge"
@@ -403,7 +409,10 @@ repository:
       is). Readiness goes from Ready to Stale, or stays Stale (if no features
       have ever been received, readiness is unchanged); initialisation has
       already finished, and resolutions continue from the last features. Providers report STALE,
-      permanently. It is a separate signal from bye because a bye means the
+      permanently. The SDK SHOULD log a warning (not an error: Edge is
+      working as intended, and resolutions continue), once, when the
+      environment becomes stale, saying that it is stale and its features
+      will not be updated again. It is a separate signal from bye because a bye means the
       source will send more (it is reconnecting), and a stale environment
       means it never will.
   update_rule: >-
@@ -520,16 +529,41 @@ transport:
 # ---------------------------------------------------------------------------
 providers:
   source_selection:
-    - {given: "host + apiKey", transport: "FeatureHub: FeatureHubSseTransport for streaming (the default for a client-evaluated key), FeatureHubPollingTransport for activePolling or passivePolling. A server-evaluated key has no default mode: it must be chosen; streaming is only available in an SDK that supports it (featurehub_edge.streaming.server_evaluated)"}
+    - {given: "host + apiKey", transport: "FeatureHub: FeatureHubSseTransport for streaming, FeatureHubPollingTransport for activePolling or passivePolling. Without a mode, the default_mode applies; for a server-evaluated key streaming is only available in an SDK that supports it (featurehub_edge.streaming.server_evaluated)"}
     - {given: "featuresUrl, and no apiKey", transport: "your own server: FeatureSnapshotTransport, activePolling (the default, for the providers and FeatureHubConnection alike) or passivePolling; streaming is an error unless a transportFactory is given (feature-snapshot-protocol.yaml)"}
     - {given: "transportFactory", transport: "the custom transport (it may use any of host, apiKey, featuresUrl)"}
     - {given: "only stores", transport: "none; features come from stores"}
+  default_mode:
+    description: >-
+      The mode a provider (or connection) uses when the application gives
+      none, in code or, in a server-side SDK, through
+      FEATUREHUB_CONNECT_TYPE and FEATUREHUB_CONNECT_INTERVAL
+      (environment_variables.mode_selection, which comes first).
+    server_side: >-
+      Streaming, for a client-evaluated key, and for a server-evaluated key
+      in an SDK that supports server-evaluated streaming
+      (featurehub_edge.streaming.server_evaluated). In one that does not, a
+      server-evaluated key has no default: the mode MUST be chosen, and
+      without one it is a validation error (validation_errors). On a server,
+      client-evaluated keys are the norm (a server-evaluated key gives the
+      provider a single context: context_change.single_context), but they
+      are not required.
+    client_side: >-
+      A client-side SDK (mobile, desktop or browser applications, which
+      usually use server-evaluated keys) chooses its own default, for any
+      key, and MUST document it; it MAY have a default pollInterval, as it
+      reads no environment variables. Dart's client provider
+      (featurehub-openfeatures-client) uses passivePolling, every 30 seconds
+      unless pollInterval is given: an application reads its flags when it
+      needs them, so a refresh then is enough, and it holds no connection
+      open.
+    featuresUrl: "your own server is only polled: activePolling, for the providers and FeatureHubConnection alike, unless a client-side SDK documents another polling default (Dart's client provider: passivePolling)"
   validation_errors:
     - only one of host/apiKey given (empty strings count as not given)
     - featuresUrl together with host or apiKey
     - featuresUrl with streaming and no transportFactory
     - "a server-evaluated key (no '*') with streaming, and no transportFactory, in an SDK that does not support server-evaluated streaming (featurehub_edge.streaming.server_evaluated)"
-    - "a server-evaluated key (no '*') with no mode, and no transportFactory: the mode must be given, explicitly or through the SDK's environment variables where it reads them (featurehub_edge.streaming.server_evaluated)"
+    - "a server-evaluated key (no '*') with no mode, and no transportFactory, in an SDK that does not support server-evaluated streaming: the mode must be given, explicitly or through the SDK's environment variables where it reads them (default_mode)"
     - "nothing to get features from (no host+apiKey, featuresUrl, transportFactory or stores)"
     - "server provider: activePolling or passivePolling without a pollInterval (0 is a valid interval: poll once, polling_transport.interval.zero_polls_once)"
     - "a negative pollInterval, or one between 0 and 5 seconds (activePolling or passivePolling, FeatureHub or your own server; polling_transport.interval.minimum)"
@@ -599,7 +633,7 @@ providers:
         FEATUREHUB_POLLING_REQ_TIMEOUT: "duration: how long a polling request may take before it is abandoned (requestTimeout)"
       streaming:
         FEATUREHUB_SSE_CONNECT_TIMEOUT: "duration: how long opening the stream may take before the attempt fails (connectTimeout)"
-        FEATUREHUB_SSE_READ_TIMEOUT: "duration: how long an open stream may go without data before it is treated as dropped and reconnected. It SHOULD be more than 5 minutes, as Edge may send nothing for that long, and an SDK SHOULD warn when it is less (featurehub_edge.streaming.last_event_id.quiet_connections)"
+        FEATUREHUB_SSE_READ_TIMEOUT: "duration: how long an open stream may go without data before it is treated as dropped and reconnected. It SHOULD be more than 5 minutes, as Edge may send nothing for that long, and an SDK SHOULD warn when it is 5 minutes or less (featurehub_edge.streaming.last_event_id.quiet_connections)"
         FEATUREHUB_SSE_INITIAL_RETRY_DELAY: "duration: the wait before the first reconnection attempt after a failure (the backoff's base delay: featurehub_edge.streaming.connection_errors.backoff)"
         FEATUREHUB_SSE_MAX_RETRY_DELAY: "duration: the longest wait between reconnection attempts (the backoff's maximum)"
         FEATUREHUB_SSE_BACKOFF_MULTIPLIER: "number, at least 1: how much the wait grows after each consecutive failure"
@@ -646,8 +680,9 @@ providers:
         either is chosen, the interval MUST be given, either in code (the
         pollInterval passed to the provider or connection) or by
         FEATUREHUB_CONNECT_INTERVAL; the one in code wins. With neither it is
-        a validation error (providers.validation_errors): there is no
-        default interval, not even 0.
+        a validation error (providers.validation_errors): a server-side SDK
+        has no default interval, not even 0 (client-side SDKs, which read no
+        environment variables, may: default_mode.client_side).
       rules:
         - "FEATUREHUB_CONNECT_TYPE=active: activePolling at the interval (mode_selection.interval). For any key"
         - "FEATUREHUB_CONNECT_TYPE=passive: passivePolling at the interval (mode_selection.interval). For any key"
@@ -660,7 +695,8 @@ providers:
           it is a validation error (providers.validation_errors)
         - "FEATUREHUB_CONNECT_TYPE not set, FEATUREHUB_CONNECT_INTERVAL set: activePolling at that interval. For any key"
         - >-
-          neither set: streaming. For a client-evaluated key always; for a
+          neither set: the default mode (providers.default_mode.server_side):
+          streaming. For a client-evaluated key always; for a
           server-evaluated key only in an SDK that supports server-evaluated
           streaming - in one that does not, a server-evaluated key with
           neither variable set is a validation error
@@ -683,9 +719,63 @@ providers:
       become Ready again, then report CONTEXT_CHANGED. Once the connection
       has failed or the environment is stale (repository.connection_failed,
       repository.environment_stale), nothing can be fetched: a context change reports CONTEXT_CHANGED
-      at once (no RECONCILING, no fetch) and the last features are kept. The
+      at once (no RECONCILING, no fetch), and the last features serve only
+      the context they belong to (single_context.stopped_for_good). The
       server provider does this per resolution, serialised, so it serves one
-      context at a time.
+      context at a time (single_context).
+    single_context:
+      rule: >-
+        In every SDK, a provider that sends the context (a server-evaluated
+        key, or sendContext) has exactly one active context: the
+        repository holds the features of one context at a time, and the SDK
+        MUST enforce it. Server-evaluated keys on a server are intended for
+        single-user batch processes and the like; a server that acts for
+        many users uses a client-evaluated key (default_mode.server_side).
+        A client-side SDK holds one context per provider instance (where its
+        OpenFeature SDK allows a provider only one binding, as Dart's does,
+        that is the same rule).
+      blocking: >-
+        A context change blocks every resolution until the new context's
+        features arrive: from the moment it starts, no resolution is
+        answered from the previous context's features as the new context's
+        result, and none is evaluated for any other context meanwhile.
+      asynchronous_resolution: >-
+        Where resolutions are asynchronous (the server providers, whose
+        OpenFeature SDKs take a context with each resolution): resolutions
+        are serialised. A resolution whose context differs from the active
+        one starts the change, and it and every resolution queued after it,
+        whatever its context, waits for the new context's features, up to
+        waitForReady. If they have not arrived by then, that resolution
+        returns the code default with ERROR and PROVIDER_NOT_READY; the next
+        resolution for the same context waits for them again (up to
+        waitForReady), without asking the source again; one for yet another
+        context starts a new change.
+      synchronous_resolution: >-
+        Where resolutions are synchronous and cannot wait (Dart's client
+        provider; OpenFeature's static-context SDKs, where the application
+        awaits the context change while the provider reports RECONCILING):
+        until the new context's features arrive, a resolution returns the
+        previous context's value with the reason STALE (its variant and flag
+        metadata as usual; errors stay errors), for up to waitForReady after
+        the change started; after that, the code default with ERROR and
+        PROVIDER_NOT_READY, until the features arrive. The application
+        SHOULD await the context change before resolving for the new
+        context.
+      bounded_wait: >-
+        The wait is bounded by waitForReady however the transport behaves:
+        a transport whose contextChanged only returns once it has the
+        features (a poll) does not lengthen it.
+      stopped_for_good: >-
+        Once the source has stopped for good (connection_failed,
+        environment_stale), nothing can be fetched: a change in progress
+        ends, and a new one only records the context. The last features
+        belong to one context, the one they were fetched for (features a
+        store gave before the first fetch count as the first context's):
+        resolutions for that context use them with their usual reasons;
+        resolutions for any other context (in a synchronous SDK, while the
+        active context is another) return the code default with ERROR and
+        PROVIDER_NOT_READY, as its features can no longer be fetched.
+        Changing back to the held context resolves them again.
     when_local: nothing to fetch; each resolution evaluates against its own context
   events:
     - {on: "first readiness within waitForReady", event: READY}
@@ -696,7 +786,9 @@ providers:
       event: >-
         STALE, after READY (even if the stop came with the first response),
         once; never followed by READY or ERROR. Resolutions continue from the
-        last features, with their usual reasons.
+        last features, with their usual reasons (for a provider that sends
+        the context, only for the context they belong to:
+        context_change.single_context.stopped_for_good).
     - {on: "applied changes that alter a feature's version, or remove/add one", event: "CONFIGURATION_CHANGED with the changed keys"}
   resolution: >-
     How a resolved feature becomes an OpenFeature result (reasons, variants,
@@ -994,7 +1086,8 @@ featurehub_edge:
         SDK MUST NOT treat a stream that is silent for less than that as
         dropped. A read timeout (FEATUREHUB_SSE_READ_TIMEOUT, or the SDK's
         own setting), where an SDK has one, SHOULD default to more than 5
-        minutes, and an SDK SHOULD warn when one is configured below it:
+        minutes, and an SDK SHOULD warn when one is configured at 5 minutes
+        or less:
         otherwise every quiet connection ends as a timeout, counted as a
         failure (connection_errors), and the client backs off, or stops for
         good, while Edge is healthy.
@@ -1010,11 +1103,19 @@ featurehub_edge:
         counted as a failure (connection_errors.classification).
       short_connections:
         threshold: 10 seconds
+        measured_from: >-
+          The request: the threshold runs from when the connection's request
+          is sent, not from when its response opens, so a server or proxy
+          that is slow to send the response headers does not make a long
+          connection look short. A cache replaying a closed stream answers
+          at once, so it is caught either way. In browsers, from creating the
+          EventSource, or from the error that begins one of its own
+          reconnections.
         rule: >-
           Edge never ends a connection of its own accord sooner than the end
           of its wait, so a connection that ends less than 10 seconds after
-          it opened did not come from Edge working normally, whether it ended
-          with a bye or not. It MUST be counted as a failure (the
+          its request was sent (measured_from) did not come from Edge working
+          normally, whether it ended with a bye or not. It MUST be counted as a failure (the
           network-error delay, growing with the backoff, and counting towards
           the maximum attempts: connection_errors), and nothing it delivered
           resets the count of consecutive failures (attempt_reset) - not its
@@ -1031,7 +1132,7 @@ featurehub_edge:
           configured (a permanent failure: stopping_for_good).
         reset_timing: >-
           The reset an event earns (attempt_reset) therefore takes effect
-          once the connection has been open for the threshold: an event in
+          once the threshold has passed since the request: an event in
           the first 10 seconds marks the reset as due, and it is made when the
           connection reaches 10 seconds (or at once, for an event after
           that). A connection that ends before then counts as a failure and
@@ -1049,11 +1150,13 @@ featurehub_edge:
         browsers: >-
           A browser's EventSource reconnects by itself, without telling the
           client how long the connection lasted, and does not back off. A
-          browser SDK SHOULD apply the rule where it can see the connection:
-          from its open event to the error or bye that ends it. If short
-          connections reach the maximum attempts (or, without one, a run of
-          them that never stops) it closes the EventSource and treats it as
-          a permanent failure (connection_errors.browsers).
+          browser SDK SHOULD apply the rule where it can see the connection
+          (measured_from), to the error or bye that ends it: after a short
+          connection it closes the EventSource and reconnects itself, backing
+          off as for any failure. If short connections reach the maximum
+          attempts it treats it as a permanent failure
+          (connection_errors.browsers); without a maximum, it keeps backing
+          off, up to the maximum delay, as any other SDK does.
       context_change: >-
         The Last-Event-ID belongs to the API key and context it was received
         for, as the ETag does when polling (featurehub_edge.polling.etag): a
@@ -1075,13 +1178,15 @@ featurehub_edge:
         context and the application would get wrong values with no error: a
         streaming mode with one is then rejected at configuration
         (providers.validation_errors), unless a transportFactory is given.
-      no_default_mode: >-
-        A server-evaluated key has no default mode, in every SDK: the mode
-        MUST be chosen. An SDK that reads its configuration from environment
-        variables (FEATUREHUB_CONNECT_TYPE, or an SDK's legacy variables:
-        providers.environment_variables) MAY take the mode
-        from them; if no mode is given explicitly or by them, it is a
-        validation error (providers.validation_errors).
+      default_mode: >-
+        In an SDK that supports server-evaluated streaming, a
+        server-evaluated key defaults to streaming on a server, as a
+        client-evaluated one does; in one that does not, it has no default
+        mode and the mode MUST be chosen (explicitly, or through the SDK's
+        environment variables), or it is a validation error
+        (providers.default_mode, providers.validation_errors). A
+        server-evaluated key gives the provider a single context
+        (providers.context_change.single_context).
       sdk_status: >-
         The Go, Python, .NET and Ruby SDKs do not support server-evaluated
         keys over streaming (they do not send x-featurehub on the SSE
@@ -1264,7 +1369,7 @@ conformance:
   - id: x-featurehub-encoding
     check: "encoding.evaluation_context.x_featurehub_header.examples all reproduce: keys and values are both encoded, then the encoded strings sorted"
   - id: edge-stale
-    check: "a 236 (polling) or edge.stale (streaming) after features: the repository's readiness is Stale, environmentStale is true, nothing more is requested, the provider reports STALE once. Any edge.stale value counts, false and null included"
+    check: "a 236 (polling) or edge.stale (streaming) after features: the repository's readiness is Stale, environmentStale is true, nothing more is requested, the provider reports STALE once, and (SHOULD) one warning is logged. Any edge.stale value counts, false and null included"
   - id: bye-not-stale
     check: "a bye leaves the repository's readiness unchanged (Ready stays Ready, Stale stays Stale, nothing is broadcast), and the provider reports no event"
   - id: streaming-statuses
@@ -1288,7 +1393,8 @@ conformance:
       wait); a connection for a new context sends no Last-Event-ID
   - id: streaming-short-connections
     check: >-
-      (with the threshold lowered for the test) with a maximum of 3
+      (with the threshold lowered for the test; measured from the request)
+      with a maximum of 3
       attempts, a server whose every connection sends features, or nothing,
       and then bye, and closes before the threshold, stops the client after
       3 attempts (a permanent failure), the waits between them growing as
@@ -1342,7 +1448,24 @@ conformance:
   - id: environment-names
     check: "each name in providers.environment_variables.names is read, with that meaning, by every server-side SDK; no client-side SDK reads them"
   - id: connection-default-mode
-    check: "a FeatureHubConnection with a featuresUrl and no mode polls actively; with a host and a client-evaluated key it streams; with a server-evaluated key and no mode (none from environment variables either) it is a validation error"
+    check: "a FeatureHubConnection with a featuresUrl and no mode polls actively; with a host and a client-evaluated key it streams; with a server-evaluated key and no mode (none from environment variables either) it streams in an SDK that supports server-evaluated streaming, and is a validation error in one that does not"
+  - id: client-default-mode
+    check: "a client-side provider with no mode uses its documented default for any key and for a featuresUrl (Dart's client provider: passivePolling, every 30 seconds by default)"
+  - id: single-context
+    check: >-
+      with a server-evaluated key: in an asynchronous SDK, resolutions for
+      two contexts made at once each get their own context's values, never
+      the other's; a context change whose features arrive after
+      waitForReady gives that resolution the code default with
+      PROVIDER_NOT_READY (not the previous context's value), and the next
+      resolution for that context waits again and gets its value, the
+      source being asked once. In a synchronous SDK, during a context
+      change a resolution returns the previous context's value with reason
+      STALE, after waitForReady the code default with PROVIDER_NOT_READY,
+      and once the features arrive the new context's value with its usual
+      reason. After a permanent stop, a resolution for a context other than
+      the held one returns the code default with PROVIDER_NOT_READY, nothing
+      is fetched, and the held context still resolves
   - id: server-evaluated-streaming
     check: "a server-evaluated key with streaming, in an SDK that supports it, sends the context on every connection and reconnection; in one that does not, it is rejected at configuration and no stream is opened; with activePolling or passivePolling it polls, sending x-featurehub"
   - id: sdk-version
