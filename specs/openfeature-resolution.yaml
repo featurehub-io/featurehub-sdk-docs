@@ -22,10 +22,11 @@
 spec:
   name: featurehub-openfeature-resolution
   version: 1.1.0
-  status: implemented-in-dart
+  status: implemented-in-dart (tracking is implemented in the TypeScript providers)
   changelog:
     - version: 1.1.0
       changes:
+        - "tracking: OpenFeature's track(name, context, details) records a FeatureHub named usage event, from a context of its own, for the usage plugins; it never fails the caller"
         - "resolution.before_evaluation: during a context change of a provider that sends the context (featurehub-protocol.yaml providers.context_change.single_context), an asynchronous provider waits, and after waitForReady returns PROVIDER_NOT_READY; a synchronous one returns the previous context's value with the reason STALE, and after waitForReady PROVIDER_NOT_READY. Never the previous context's value as the new one's usual result. Once the source has stopped for good, a context other than the one whose features are held gets PROVIDER_NOT_READY"
     - version: 1.0.0
       changes:
@@ -201,3 +202,62 @@ flag_metadata:
     - feature: {version: 4, type: STRING, fp: {featureVersion: "99", shop: "omu&co"}}
       expect: {shop: "omu&co", featureVersion: 4, featureType: STRING}
       note: the property named featureVersion is replaced by the feature's version
+
+# ---------------------------------------------------------------------------
+# Tracking: OpenFeature's track as FeatureHub usage
+# ---------------------------------------------------------------------------
+tracking:
+  description: >-
+    OpenFeature's tracking API (client.track) records an event that is not
+    a flag evaluation: a purchase, a sign-up. A FeatureHub provider records
+    it as a FeatureHub named usage event, which goes to the usage plugins
+    registered with the provider's FeatureHub connection or configuration
+    (an analytics tool such as Segment, say), as an application using the
+    FeatureHub SDK directly records one with recordNamedUsage.
+  call: "provider.track(trackingEventName, context, trackingEventDetails), as the OpenFeature SDK calls it for client.track"
+  event:
+    name: trackingEventName, as given
+    user_key: "the context's targetingKey (as encoding.evaluation_context maps it to userkey), or else its session"
+    context_attributes: "the context mapped as featurehub-protocol.yaml encoding.evaluation_context does, without the user key"
+    additional_params: "every entry of trackingEventDetails (including OpenFeature's numeric `value`), as given"
+    feature_values: >-
+      where the SDK's named usage events carry them, the features' values
+      evaluated for the tracking context, as for any named usage event of
+      that SDK
+  rules:
+    - >-
+      The event is built from a context of its own, made for the call. It
+      MUST NOT change a context the provider keeps: a server-evaluated key's
+      single shared context (featurehub-protocol.yaml providers.context_change)
+      in particular, which would otherwise take on the tracking context's
+      attributes and fetch the features again.
+    - >-
+      Tracking fetches nothing, and does not wait for the source: it records
+      from the features held.
+    - >-
+      It never fails the caller: a context that cannot be mapped (an
+      INVALID_CONTEXT for a resolution), or a usage plugin that fails,
+      records nothing and is not raised. Before initialisation, and after
+      shutdown, it records nothing.
+    - >-
+      With no usage plugin registered the event goes nowhere. Tracking is
+      not sent to FeatureHub.
+    - >-
+      Hooks are not involved: OpenFeature runs hooks around flag
+      evaluations only, so an OpenTelemetry hook does not see tracked
+      events; usage plugins do.
+  test_vectors:
+    - call: {name: "checkout-complete", context: {targetingKey: lingling, plan: "always wonder"}, details: {value: 99.95, currency: NZD}}
+      expect: {eventName: "checkout-complete", userKey: lingling, contextAttributes: {plan: "always wonder"}, additionalParams: {value: 99.95, currency: NZD}}
+    - call: {name: "todo-add", context: {session: s1, country: NZ}, details: {}}
+      expect: {eventName: "todo-add", userKey: s1, contextAttributes: {session: s1, country: NZ}}
+      note: "no targetingKey: the session is the user key; the well-known key is written lowercase"
+    - call: {name: "kwong-pastry", context: {targetingKey: orm, shop: {nested: true}}, details: {}}
+      expect: "nothing recorded, and no error raised"
+    - call: {name: "omu-co", context: {targetingKey: kornaphat}, details: {}, provider: "server-evaluated key, shared context last used for {targetingKey: chago}"}
+      expect: "the event's user key is kornaphat; the shared context still has user key chago, and no features are fetched"
+  conformance:
+    - {id: track-named-usage, check: "tracking.test_vectors all reproduce, as seen by a usage plugin"}
+    - {id: track-own-context, check: "tracking with a server-evaluated key leaves the shared context, and the features held, unchanged, and makes no request"}
+    - {id: track-never-fails, check: "tracking with an unmappable context, a failing usage plugin, before initialisation or after shutdown raises nothing"}
+

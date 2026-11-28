@@ -4,50 +4,124 @@
 # own clients, and how those clients fetch them. It is not FeatureHub's
 # protocol: neither side talks to FeatureHub Edge here. Describes, precisely
 # enough to reimplement in another language:
-#   1. the encoding (FeatureSnapshot and its ETag);
-#   2. the snapshot server, and the function an SDK gives the server's code;
+#   0. where the code lives (placement): only a server SDK serves
+#      snapshots, through a feature store; nothing in the core SDK builds a
+#      snapshot or computes the features' SHA;
+#   1. the encoding (FeatureSnapshot, its sha and its ETag);
+#   2. the snapshot server, the snapshot store, and the function it gives
+#      the server's code;
 #   3. the snapshot client (polling / passive refresh with If-None-Match).
 #
 # Built on featurehub-protocol.yaml, which it does not repeat: the FeatureState JSON
 # (encoding.feature_state), the SHA (encoding.sha), the evaluation context
-# (encoding.evaluation_context), polling and passive scheduling
-# (polling_transport, shared with FeatureHub polling), what the repository
-# does with each notification (repository), the transport contract
-# (transport) and how providers choose a transport (providers). A reference
+# and its canonical header (encoding.evaluation_context), polling and passive
+# scheduling (polling_transport, shared with FeatureHub polling), what the
+# repository does with each notification (repository), the transport
+# contract (transport) and how providers choose a transport (providers). The
+# snapshot store is a feature store (feature-store.yaml store). A reference
 # to one of those sections names that file.
 #
 # Paths to code, tests and fixtures are in the Dart SDK repository,
 # https://github.com/featurehub-io/featurehub-flutter-sdk, unless another
 # repository is named.
 #
-# Reference implementation: the Dart SDK,
+# Reference implementation: the Dart SDK. Version 2.0.0 moves the server
+# side out of the core; until the Dart SDK follows, it has (1.0.0)
 #   featurehub-openfeatures-common (lib/src/feature_snapshot.dart,
 #   lib/src/transport/snapshot_transport.dart,
-#   ClientFeatureRepository.featureSnapshot in lib/src/repository.dart), and
+#   ClientFeatureRepository.featureSnapshot and featuresSha in
+#   lib/src/repository.dart), and
 #   the server example featurehub-openfeatures-server-sdk/example/main.dart
 #   (GET /features).
+# Where 2.0.0 puts them: the snapshot client stays a transport in
+# featurehub-openfeatures-common; the snapshot store (server.snapshot_store),
+# the snapshot's sha and its encoding go to featurehub-openfeatures-server-sdk;
+# the repository loses featureSnapshot, featuresSha and loadFeatureSnapshot
+# (none of them was ever in a released SDK).
 #
 # Conventions: MUST / SHOULD / MAY as in RFC 2119. "repository" is the local
-# in-memory store of features that resolutions read from. Everything marked
-# `reference_behaviour` is what the Dart SDK does; implementations SHOULD match
-# it so clients and servers in different languages interoperate.
+# in-memory store of features that resolutions read from. "core SDK" is the
+# package every provider, client or server, is built on (Dart:
+# featurehub-openfeatures-common). Everything marked `reference_behaviour` is
+# what the Dart SDK does; implementations SHOULD match it so clients and
+# servers in different languages interoperate.
 
 spec:
   name: feature-snapshot-protocol
-  version: 1.0.0
-  status: implemented-in-dart
+  version: 2.0.0
+  status: specified; the Dart SDK implements 1.0.0
   changelog:
+    - version: 2.0.0
+      changes:
+        - "encoding.etag.clock_part: an evaluated snapshot's result can change with the server's clock (rollout-strategies.yaml fhubWhenActive, a fixed point in time from the attribute that the server's clock is compared against; and, separately, DATE / DATETIME attributes the context does not supply, which use the current time) with no change to the features or the context, so its ETag is \"<sha>_t<count>\": count is the number of the features' clock boundaries (encoding.clock_boundaries) at or before the server's clock. Features without any boundaries, and snapshots served as delivered (without_context), keep \"<sha>\". The sha (encoding.snapshot_sha) does not include the count; clients treat the ETag as opaque"
+        - "encoding.etag.format: the clock part is _t<count>, the form FeatureHub Edge's time-aware etags for server-evaluated keys use"
+        - "server.snapshot_store.copy.clock_boundaries: the store works out the boundaries whenever its copy changes; feature_snapshot gives the ETag with the snapshot, and the store SHOULD offer the ETag for a context on its own for the If-None-Match check, which still needs no evaluation"
+        - "placement: the core SDK MUST NOT build snapshots or compute SHAs. ClientFeatureRepository.featureSnapshot, repository.featuresSha and repository.loadFeatureSnapshot are removed (featurehub-protocol.yaml transport.helpers; none was ever in a released SDK). Only a server SDK serves snapshots, through a feature store (server.snapshot_store); everything else in the SDK stays as it is. Clients need nothing new: the snapshot client is the transport for a featuresUrl, an alternative to the FeatureHub Edge transports"
+        - "server.snapshot_store: a feature store that follows the repository's raw feature updates, keeps its own copy of the features and their sha, and, for a context, asks the repository for each feature in turn (openfeature-resolution.yaml evaluation, without the interceptors step)"
+        - "encoding.snapshot_sha: a snapshot's sha covers its form and the context it was evaluated for: the SHA-256 of the features' SHA input, \"|sendContext=true\" (evaluated) or \"|sendContext=false\" (served as delivered, strategies included), and, for a context, \"|\" and the context's canonical x-featurehub header (the ordered form contextSha hashes). The two forms of the same features never share a sha or an ETag, and a snapshot's sha is never featurehub-protocol.yaml encoding.sha. encoding.etag.why_valid replaces why_valid_per_url: the ETag no longer depends on the context being in the URL"
+        - "server.snapshot_store.feature_snapshot.clock: the store reads the clock once per request, before evaluating anything, and uses that one reading for the evaluation (fhubWhenActive and DATE / DATETIME attributes the context does not supply) and for the ETag's count, so a body is never older than its ETag"
+        - "encoding.clock_boundaries: date-times are to the second (rollout-strategies.yaml), so an fhubWhenActive time T gives the boundaries T and T plus one second, and the test vectors write date-times to the second"
+        - "encoding.feature_snapshot.decoding: a snapshot without a sha has none; the reader no longer computes one (clients compute no SHA)"
+        - "client.responses: with neither an ETag header nor a sha in the body the client stores no ETag, and sends no If-None-Match"
     - version: 1.0.0
       changes:
         - "First published version."
   related:
     featurehub_protocol: >-
-      featurehub-protocol.yaml (FeatureState, the SHA, the evaluation context, polling
-      scheduling, the repository, the transport contract, provider wiring)
+      featurehub-protocol.yaml (FeatureState, the SHA, the evaluation context
+      and its canonical header, polling scheduling, the repository, the
+      transport contract, provider wiring)
     strategy_evaluation: >-
-      rollout-strategies.yaml (how a snapshot server evaluates the features
+      rollout-strategies.yaml (how the repository evaluates the features
       for a request's context)
-    feature_stores: feature-store.yaml (the Redis store's keys use the same SHA)
+    openfeature_resolution: >-
+      openfeature-resolution.yaml evaluation (what the snapshot store asks
+      the repository for, feature by feature)
+    feature_stores: >-
+      feature-store.yaml (the store contract the snapshot store implements,
+      raw feature updates; the Redis store's keys use the same SHA)
+
+# ---------------------------------------------------------------------------
+# 0. Placement: where the snapshot code lives
+# ---------------------------------------------------------------------------
+placement:
+  core:
+    rule: >-
+      The core SDK MUST NOT contain snapshot support: no function on the
+      repository (or anywhere in the core) that builds a feature_snapshot or
+      assembles response data for one, and no SHA of the features held. The
+      repository does not compute encoding.sha at all.
+    why: >-
+      Serving snapshots is a server's job, and only a server SDK's. Keeping
+      it out of the core keeps the repository the same for every provider,
+      and keeps code every client ships (browser and mobile included) free
+      of what only a server uses.
+  server:
+    rule: >-
+      Only a server SDK (Dart: featurehub-openfeatures-server-sdk) serves
+      snapshots, and it does so with a feature store, the snapshot store
+      (server.snapshot_store), which the server's code attaches to its
+      provider like any other store. The store follows the repository's
+      updates, keeps its own copy of the features, computes the sha
+      (encoding.snapshot_sha) and assembles each snapshot. Nothing else
+      changes: the repository, the transports, the providers and the
+      resolution of flags are exactly as without it.
+  client:
+    rule: >-
+      A client needs nothing new. The snapshot client (client) is the
+      transport a provider uses for a featuresUrl (featurehub-protocol.yaml
+      providers.source_selection), an alternative to the FeatureHub Edge
+      transports through the transport contract (featurehub-protocol.yaml
+      transport). It decodes each snapshot and gives its features to the
+      repository as a full set (notify(features)); it computes no SHA, using
+      the server's ETag (or the snapshot's sha) as it is.
+  extra_support:
+    rule: >-
+      An SDK MAY expose extra support for snapshots beyond the snapshot
+      client (the JavaScript SDK, for example, may offer helpers for reading
+      or caching them), but SHA computation and assembling response data
+      MUST NOT be in its core package. A server SDK in that language provides
+      them, in its snapshot store.
 
 # ---------------------------------------------------------------------------
 # 1. Encoding
@@ -58,30 +132,33 @@ encoding:
 
   feature_snapshot:
     description: >-
-      The features a repository holds plus their SHA, as served by a snapshot
-      server and read by a snapshot client.
+      The features a snapshot server serves for one request, plus their sha
+      (snapshot_sha), as built by the snapshot store and read by a snapshot
+      client.
     json_schema:
       $schema: https://json-schema.org/draft/2020-12/schema
       $id: featurehub/feature-snapshot
       type: object
       required: [features]
       properties:
-        sha: {type: string, pattern: "^[0-9a-f]{64}$", description: "See featurehub-protocol.yaml encoding.sha. Optional on input (computed if absent)."}
+        sha: {type: string, pattern: "^[0-9a-f]{64}$", description: "See snapshot_sha. A server MUST send it; a reader accepts a snapshot without it."}
         features: {type: array, items: {$ref: "featurehub/feature-state"}}
     example:
-      sha: 90efe21f27585227b23a9782d8aabd8b5139cda839df1a0b8b60fe4c6673c9fd
+      request: "/features?country=nz"
+      sha: 5da6ce2616ad4cb03d94d3308a7557f2805d2de9624a63985ab267e449641876
       features:
         - {id: f1, key: FEATURE_STRING, l: false, version: 2, type: STRING, value: green, v: nz, environmentId: env}
         - {id: f2, key: FEATURE_TITLE_TO_UPPERCASE, l: false, version: 1, type: BOOLEAN, value: true, environmentId: env}
     decoding:
       description: >-
-        A reader (Dart: FeatureSnapshot.from) MUST accept any of these inputs and
-        fail with a format error otherwise, leaving the repository unchanged:
+        A reader (the snapshot client's decoder; Dart: FeatureSnapshot.from)
+        MUST accept any of these inputs and fail with a format error
+        otherwise, so the repository is left unchanged:
       accepted_inputs:
         - an already-decoded snapshot object
         - a JSON string (decoded first; invalid JSON is a format error)
-        - an object/map with `features` (an array) and optional `sha`; if `sha` is absent or not a string it is computed from the features
-        - a bare array of features; the sha is computed
+        - "an object/map with `features` (an array) and optional `sha`; if `sha` is absent or not a string the snapshot has no sha (the reader MUST NOT compute one)"
+        - a bare array of features; the snapshot has no sha
       errors:
         - "`features` missing or not an array"
         - "any element is not a decodable feature_state (missing id/key/version/type, or bad type)"
@@ -91,17 +168,167 @@ encoding:
         version is absent or null is a format error. Decoders MUST NOT default
         it to 0 (the SHA, the update rule and change events all depend on it).
 
+  snapshot_sha:
+    description: >-
+      The sha a snapshot carries, and its ETag. Computed only by the
+      snapshot store (server.snapshot_store), never by the core SDK or a
+      client. It extends featurehub-protocol.yaml encoding.sha with the
+      snapshot's form (sendContext) and the context the snapshot was
+      evaluated for, written the same canonical, ordered way that contextSha
+      hashes it, so a snapshot for one context never has the sha of
+      another's, and an evaluated snapshot never has the sha of the same
+      features served as delivered.
+    form:
+      sendContext=true: >-
+        evaluated (server.evaluation.with_context), for clients that send
+        their context (client.configuration.send_context true): values only,
+        no strategies. This includes a request with no context that the
+        server evaluates as for an empty context.
+      sendContext=false: >-
+        served as delivered (server.evaluation.without_context), for clients
+        that evaluate locally (send_context false): strategies included.
+        There is never a context with this form.
+    algorithm:
+      - "features_input: the input of featurehub-protocol.yaml encoding.sha for the store's features: \"<id>:<version>\" for each, sorted by id, joined with \"|\" (empty for no features)"
+      - "form: \"sendContext=true\" for an evaluated snapshot, \"sendContext=false\" for one served as delivered (form)"
+      - "header: featurehub-protocol.yaml encoding.evaluation_context.x_featurehub_header of the request's context (keys and values encoded, the encoded strings sorted, joined with \",\"), the same string contextSha (encoding.evaluation_context.context_sha) is the SHA-256 of; there is none for no context, an empty context, one with no attributes left once the null and empty ones, and fhubWhenActive, are dropped, or the sendContext=false form"
+      - "input: features_input + \"|\" + form, then, if there is a header, + \"|\" + header"
+      - "sha: SHA-256 of the UTF-8 bytes of input, as 64 lowercase hex characters"
+    why: >-
+      encoding.sha covers ids and versions only, so on its own every context
+      gets the same sha although each gets different values, and the
+      evaluated and as-delivered forms of the same features get the same sha
+      although their bodies differ. Adding the form and the canonical header
+      makes the sha, and so the ETag, identify the features, the form and
+      the context they were evaluated for, wherever the context is carried
+      (query parameters today, a header if ever). Without the form, a server
+      that changed its includeStrategies choice on the same URL would
+      answer a client holding the other form's ETag with a 304, and a
+      client evaluating locally could keep evaluated values (every
+      feature's default, for its context) indefinitely.
+    test_vectors:
+      - {features: [{id: f1, version: 2}, {id: f2, version: 1}], context: {}, form: sendContext=true, input: "f1:2|f2:1|sendContext=true", sha: 2eb34db18f7d62cee6c8dd3aa234034598a667982b8d9831bee7bba2c4c33852, note: "no context, evaluated"}
+      - {features: [{id: f1, version: 2}, {id: f2, version: 1}], context: {}, form: sendContext=false, input: "f1:2|f2:1|sendContext=false", sha: e17b012d96433267fa3dc02316845226adbdb7d82bcb69f987617f178be3f482, note: "the same features served as delivered: a different sha"}
+      - {features: [{id: f1, version: 2}, {id: f2, version: 1}], context: {country: nz}, form: sendContext=true, input: "f1:2|f2:1|sendContext=true|country=nz", sha: 5da6ce2616ad4cb03d94d3308a7557f2805d2de9624a63985ab267e449641876}
+      - {features: [{id: f1, version: 2}, {id: f2, version: 1}], context: {userkey: fred, country: nz}, form: sendContext=true, input: "f1:2|f2:1|sendContext=true|country=nz,userkey=fred", sha: cb242c4861543ab43fff289ca2bb66b28e379bea6498e139b4f31b76f28e3f25}
+      - {features: [{id: f1, version: 2}, {id: f2, version: 1}], context: {shop: ["a&b", "c d"]}, form: sendContext=true, input: "f1:2|f2:1|sendContext=true|shop=a%26b%2Cc%20d", sha: 24cccad437b2d0f6ec32a627612c0186aed1d5642522c8fcdc2ae607cc2394b4}
+      - {features: [{id: f1, version: 2}, {id: f2, version: 1}], context: {city: Zürich, greeting: สวัสดี}, form: sendContext=true, input: "f1:2|f2:1|sendContext=true|city=Z%C3%BCrich,greeting=%E0%B8%AA%E0%B8%A7%E0%B8%B1%E0%B8%AA%E0%B8%94%E0%B8%B5", sha: c735f8a7f7147bdb607d0c7c84e837fbe5b586150a05a2bd24b84e715e4a7936}
+      - {features: [], context: {userkey: fred}, form: sendContext=true, input: "|sendContext=true|userkey=fred", sha: fa72395ce672552717d0f1124c506bee7489dfc1b08e0e68c7a13bb19ed3687a}
+      - {features: [], context: {}, form: sendContext=true, input: "|sendContext=true", sha: 47b4f8c61e15e70436a1debf458dfa0a7d6450d96e8ab384e461f47a6addee8d}
+      - {features: [{id: f1, version: 2}, {id: f2, version: 1}], context: {userkey: fred, empty: [], gone: null}, form: sendContext=true, input: "f1:2|f2:1|sendContext=true|userkey=fred", sha: 75d6c29325aa18ac5255ca4b4d1513249d2d9dc74c5f494dc893884aa87def88, note: "null and empty attributes are dropped, as for the header"}
+
+  clock_boundaries:
+    description: >-
+      The moments at which an evaluated feature's value can change because
+      the server's clock moved, with nothing else changing. They depend only
+      on the features (their strategies' attributes), never on a request's
+      context or the evaluated values, so a snapshot store can work them out
+      once for its copy. There are two unrelated sources, fhub_when_active
+      and other_date_attributes; the boundaries are the union of both.
+    fhub_when_active:
+      what_it_is: >-
+        An attribute whose fieldName is fhubWhenActive (case-insensitive) is
+        a specific point in time, T: the ISO-8601 date-time held in its
+        values (rollout-strategies.yaml
+        algorithm.well_known_attributes.fhubWhenActive). It never comes from
+        the context, it is never "now", and the attribute's type is ignored.
+        The attribute compares the server's clock against T, and its
+        conditional says how: GREATER_EQUALS applies from T on, LESS until
+        T, and so on.
+      boundaries: >-
+        Strategy evaluation works in whole seconds: T and the clock are both
+        truncated to the second (rollout-strategies.yaml), so the clock is
+        before T, in T's second, or after it. The result can change only
+        when the clock reaches T and when it reaches the next second. Each T
+        gives two boundaries: T truncated to the second, and one second
+        later. Counting them: before T is 0, during T's second is 1, from
+        the next second on is 2.
+      rules:
+        - "only for the conditionals that compare against the clock: EQUALS, NOT_EQUALS, GREATER, GREATER_EQUALS, LESS, LESS_EQUALS. With any other conditional the attribute never matches, whatever the time, so it adds nothing"
+        - "each non-null value is read as an ISO-8601 date-time (rollout-strategies.yaml matchers.iso_date_time; no offset means UTC), converted to UTC and truncated to the second; one that does not match adds nothing"
+    other_date_attributes:
+      what_they_are: >-
+        Separately, and nothing to do with fhubWhenActive: any other
+        attribute of type DATE or DATETIME is compared against a value from
+        the request's context, but when the context does not supply it the
+        current time is used instead (rollout-strategies.yaml
+        algorithm.attributes_match). Its result can then change with the
+        clock too.
+      rules:
+        - "type DATETIME: each non-null value parsed as an ISO-8601 date or date-time (rollout-strategies.yaml matchers.iso_date_time; no offset means UTC) and truncated to the second; boundaries: that second and the next (the DATETIME matcher compares at seconds precision: rollout-strategies.yaml matchers.DATETIME)"
+        - "type DATE: each non-null value as a YYYY-MM-DD date (an offset, if present, is ignored); boundaries: midnight UTC at the start of that date and of the next day (the DATE matcher compares the UTC date)"
+        - "a value that does not parse adds nothing"
+      why_all_of_them: >-
+        Whether the current time is used depends on the request's context.
+        Counting every DATE and DATETIME attribute keeps the boundaries
+        independent of the context: where a context does supply the
+        attribute, its boundaries cost at most a 200 instead of a 304 when
+        the clock passes them.
+      not_counted: >-
+        Conditionals that compare such a time as text (STARTS_WITH,
+        ENDS_WITH, REGEX) can change at moments no boundary describes; they
+        are not covered, and a client may keep such a value until the next
+        change to the features.
+    collection:
+      - "every attribute of every strategy of every feature is looked at (null or absent strategies, attributes and values counting as none); any attribute not described above adds nothing"
+      - "the boundaries are a set: the same instant from several attributes or features counts once"
+    count: "the number of boundaries at or before now, the time the snapshot store read once for the request, before evaluating (server.snapshot_store.feature_snapshot.clock)"
   etag:
-    format: 'the SHA in double quotes: "<sha>"  (a strong entity tag)'
-    example: '"90efe21f27585227b23a9782d8aabd8b5139cda839df1a0b8b60fe4c6673c9fd"'
-    why_valid_per_url: >-
-      The SHA covers ids and versions only, so different contexts get the same
-      ETag. This is still a correct validator because the context is in the
-      URL (query parameters) and HTTP caches/clients validate per URL, and the
-      evaluated values for a fixed context only change when a feature's
-      version changes (which changes the SHA). If a context were ever carried
-      in a header instead of the URL, the ETag MUST also incorporate the
-      context.
+    format: >-
+      The snapshot's sha (snapshot_sha) in double quotes, a strong entity
+      tag: "<sha>" when the snapshot carries strategies (server.evaluation.without_context)
+      or its features have no clock boundaries (clock_boundaries), and
+      otherwise "<sha>_t<count>" with count as clock_boundaries.count, in
+      decimal.
+    examples:
+      - '"5da6ce2616ad4cb03d94d3308a7557f2805d2de9624a63985ab267e449641876"'
+      - '"5da6ce2616ad4cb03d94d3308a7557f2805d2de9624a63985ab267e449641876_t2"'
+    clock_part: >-
+      The count is outside the sha: encoding.snapshot_sha, the body's sha
+      and their test vectors do not include it; only the ETag carries it.
+      It is present whenever the features have boundaries, t0 included,
+      so the form of a snapshot's ETag does not depend on the time.
+      Clients treat the ETag as opaque and MUST NOT parse it.
+    why_valid: >-
+      The sha covers the features' ids and versions, the snapshot's form
+      (sendContext) and the context they were evaluated for. For a fixed context an evaluated value changes
+      only when a feature's version changes (which changes the sha) or when
+      the clock passes one of the features' boundaries (which changes the
+      count). So the ETag is a correct validator in any HTTP cache or
+      client, and stays one if a context is ever carried in a header
+      instead of the URL. A snapshot served as delivered carries the
+      strategies themselves, which the client evaluates against its own
+      clock, so it needs no count.
+    body_sha_fallback: >-
+      A client given no ETag header uses "\"" + the body's sha + "\"" as its
+      validator (client.responses). For features with clock boundaries
+      that never equals the server's ETag, so such a client gets a 200 on
+      every poll instead of a 304: it never keeps a stale value, it only
+      loses the saving. A server MUST send the ETag header (and expose it:
+      server.endpoint.cors) to avoid this.
+    test_vectors:   # f1 version 2 and f2 version 1 (the snapshot_sha vectors' features)
+      fhub_when_active:   # T = 2026-12-01T09:00:00Z, from the attribute; the context plays no part in it
+        features: "f1 has one strategy: fhubWhenActive GREATER_EQUALS [\"2026-12-01T09:00:00Z\"]; f2 has none"
+        vectors:
+          - {context: {country: nz}, clock: "2026-12-01T08:59:59Z", etag: '"5da6ce2616ad4cb03d94d3308a7557f2805d2de9624a63985ab267e449641876_t0"', shows: "before T"}
+          - {context: {country: nz}, clock: "2026-12-01T09:00:00Z", etag: '"5da6ce2616ad4cb03d94d3308a7557f2805d2de9624a63985ab267e449641876_t1"', shows: "at T"}
+          - {context: {country: nz}, clock: "2026-12-01T09:00:00.999Z", etag: '"5da6ce2616ad4cb03d94d3308a7557f2805d2de9624a63985ab267e449641876_t1"', shows: "still T's second"}
+          - {context: {country: nz}, clock: "2026-12-01T09:00:01Z", etag: '"5da6ce2616ad4cb03d94d3308a7557f2805d2de9624a63985ab267e449641876_t2"', shows: "after T"}
+          - {context: {country: nz, fhubWhenActive: "2020-01-01T00:00:00Z"}, clock: "2026-12-01T08:59:59Z", etag: '"5da6ce2616ad4cb03d94d3308a7557f2805d2de9624a63985ab267e449641876_t0"', shows: "a context key named fhubWhenActive is dropped (featurehub-protocol.yaml encoding.evaluation_context), so neither the sha nor the count changes"}
+          - {context: {country: nz}, clock: "2027-01-01T00:00:00Z", etag: '"5da6ce2616ad4cb03d94d3308a7557f2805d2de9624a63985ab267e449641876_t2"', shows: "stable after the time"}
+          - {context: {}, form: sendContext=true, clock: "2026-12-01T09:00:00Z", etag: '"2eb34db18f7d62cee6c8dd3aa234034598a667982b8d9831bee7bba2c4c33852_t1"', shows: "no context, evaluated: the count still applies"}
+          - {context: {}, form: sendContext=false, clock: "2026-12-01T09:00:00Z", etag: '"e17b012d96433267fa3dc02316845226adbdb7d82bcb69f987617f178be3f482"', shows: "served as delivered: another sha, and no count"}
+      other_date_attributes:   # no fhubWhenActive; the context supplies neither attribute, so the current time is used
+        features: "f1 has one strategy with two attributes: launch DATE GREATER [\"2026-12-01\"] and expires DATETIME LESS [\"2026-12-01T09:00:00Z\"]; f2 has none"
+        boundaries: ["2026-12-01T00:00:00Z", "2026-12-01T09:00:00Z", "2026-12-01T09:00:01Z", "2026-12-02T00:00:00Z"]
+        vectors:
+          - {context: {country: nz}, clock: "2026-11-30T23:59:59Z", etag: '"5da6ce2616ad4cb03d94d3308a7557f2805d2de9624a63985ab267e449641876_t0"'}
+          - {context: {country: nz}, clock: "2026-12-01T09:00:00.999Z", etag: '"5da6ce2616ad4cb03d94d3308a7557f2805d2de9624a63985ab267e449641876_t2"', shows: "DATETIME at seconds precision"}
+          - {context: {country: nz}, clock: "2026-12-02T00:00:00Z", etag: '"5da6ce2616ad4cb03d94d3308a7557f2805d2de9624a63985ab267e449641876_t4"'}
+      no_boundaries:
+        features: "f1 has two strategies: country EQUALS [nz], and fhubWhenActive INCLUDES [\"2026-12-01T09:00:00Z\"] (never matches, so no boundaries); f2 has none"
+        vectors:
+          - {context: {country: nz}, clock: "2027-01-01T00:00:00Z", etag: '"5da6ce2616ad4cb03d94d3308a7557f2805d2de9624a63985ab267e449641876"', shows: "no clock boundaries: no count"}
 
 # ---------------------------------------------------------------------------
 # 2. Snapshot server
@@ -109,9 +336,10 @@ encoding:
 server:
   description: >-
     Your own server, connected to FeatureHub with a client-evaluated API key
-    (see api_key_requirement), re-serving features to its own clients. Reference: GET /features in
-    featurehub-openfeatures-server-sdk/example/main.dart, using
-    ClientFeatureRepository.featureSnapshot (snapshot_api).
+    (see api_key_requirement), re-serving features to its own clients. It
+    attaches a snapshot store (snapshot_store) to its provider and answers
+    each request from it (snapshot_api). Reference: GET /features in
+    featurehub-openfeatures-server-sdk/example/main.dart.
   endpoint:
     method: GET
     path: /features   # any path; clients are configured with the full URL
@@ -128,14 +356,21 @@ server:
         If-None-Match: optional; see conditional_requests
         Accept: application/json (clients send it; servers MAY ignore)
     conditional_requests:
-      etag: 'encoding.etag of the repository SHA at request time'
+      etag: 'encoding.etag for the request''s context and form: the sha (encoding.snapshot_sha) and, for an evaluated snapshot with clock boundaries, the count (encoding.clock_boundaries) at the time read once for the request (snapshot_store.feature_snapshot.clock)'
       if_none_match_matching:
         - split the header value on ","
         - trim each tag
         - strip a leading "W/" (weak comparison)
-        - it matches if any tag is "*" or equals the current ETag exactly (quotes included)
+        - it matches if any tag is "*" or equals the current ETag exactly (quotes included, and the _t<count> part with it: a tag with only the sha, or another count, does not match)
       on_match: '304 Not Modified, empty body, headers ETag and Cache-Control: no-cache'
-      check_order: the If-None-Match check MAY happen before evaluating the context (the reference does it first)
+      check_order: >-
+        The If-None-Match check MAY happen before evaluating the context: the
+        ETag needs only the store's features, the form, the context's header
+        and the request's time, not the evaluated values (the reference does
+        it first). The snapshot store SHOULD offer the ETag for a context on
+        its own for this. Either way the time is read once, before anything
+        is evaluated (snapshot_store.feature_snapshot.clock): a 200 carries
+        the ETag for that time and a body evaluated at it.
     evaluation:
       selection: >-
         A request with query parameters is evaluated for that context
@@ -159,20 +394,23 @@ server:
           serves strategies without a context, when it has none (an empty
           context). The result is exactly what FeatureHub Edge would send for
           a server-evaluated key.
+        how: >-
+          The snapshot store asks the repository for each of its features in
+          turn, evaluated for the context (snapshot_store.feature_snapshot),
+          rather than evaluating strategies itself.
         per_feature:
-          - "if the feature has no strategies (absent or empty): output a copy as is, keeping its `v`"
-          - "otherwise apply the strategies, in order, to the context (spec.related.strategy_evaluation)"
-          - "output: id, key, l, version, type, fp (copy), environmentId unchanged; value = matched strategy's value, else the feature's value; v = matched strategy's id, else null; strategies omitted"
+          - "evaluate the feature for the context as openfeature-resolution.yaml evaluation does, without its interceptors step: a feature with no strategies gives its own value and `v`; otherwise its strategies are applied, in order (spec.related.strategy_evaluation)"
+          - "output: id, key, l, version, type, fp (copy), environmentId unchanged; value = the evaluated value (the matched strategy's, else the feature's); v = the evaluated strategy id, else null; strategies omitted"
       without_context:
         description: >-
           Used when the request has no query parameters and the server has
           chosen to serve strategies without a context. "As delivered": deep
-          copies with strategies, for clients that evaluate locally (e.g. a
-          provider using sendContext=false, the server provider's default).
-          Exposes every strategy and its values: only serve this to trusted
-          clients.
+          copies of the snapshot store's features with strategies, for
+          clients that evaluate locally (e.g. a provider using
+          sendContext=false, the server provider's default). Exposes every
+          strategy and its values: only serve this to trusted clients.
       value_interceptors: not applied (local overrides stay local)
-      sha: the repository SHA when the snapshot is taken (covers all features, unaffected by the context)
+      sha: "encoding.snapshot_sha of the snapshot store's features when the snapshot is taken, with the form (sendContext=true for with_context, sendContext=false for without_context) and the request's context (none for without_context and for an empty context)"
     stale_environment: >-
       Not part of this protocol. 236 (a stale environment) is only sent by
       FeatureHub Edge's polling API (featurehub-protocol.yaml featurehub_edge.polling); a snapshot
@@ -181,16 +419,16 @@ server:
     responses:
       - status: 200
         when: features served
-        headers: {Content-Type: application/json, ETag: '"<sha>"', Cache-Control: no-cache}
+        headers: {Content-Type: application/json, ETag: 'encoding.etag ("<sha>" or "<sha>_t<count>")', Cache-Control: no-cache}
         body: encoding.feature_snapshot
       - status: 304
         when: If-None-Match matches
-        headers: {ETag: '"<sha>"', Cache-Control: no-cache}
+        headers: {ETag: 'encoding.etag, as for 200', Cache-Control: no-cache}
       - status: 400
         when: invalid context (featurehub-protocol.yaml encoding.evaluation_context rules)
         body: text message
       - status: 503
-        when: the server has no features yet (its own FeatureHub connection is not initialised)
+        when: the snapshot store has no features yet (snapshot_store.ready), including when it refused to attach
       - status: "401/403/404 or other 4xx"
         when: server-specific rejections; clients treat these as permanent (see client.responses)
     cors:
@@ -200,19 +438,102 @@ server:
         - "Access-Control-Allow-Origin: * (or the origin)"
         - "Access-Control-Allow-Headers: *, or at least if-none-match plus any custom headers"
         - "Access-Control-Expose-Headers: ETag (so script can read it)"
+
+  snapshot_store:
+    description: >-
+      A feature store (feature-store.yaml store) in the server SDK, which
+      turns the repository's features into snapshots. It supplies no
+      features: it only follows the repository's raw feature updates
+      (feature-store.yaml raw_feature_updates), keeps its own copy of the
+      features as delivered, in its own snapshot type, with their sha, and
+      builds each request's snapshot from that copy. It is the only place in
+      an SDK that computes encoding.snapshot_sha or assembles a
+      feature_snapshot (placement).
+    dart: "FeatureSnapshotStore in featurehub-openfeatures-server-sdk (replacing ClientFeatureRepository.featureSnapshot)"
+    source: "snapshot-store (it never notifies the repository, so nothing of its own comes back to it)"
+    attach:
+      refuse_when: >-
+        A server-evaluated key (target.apiKey without '*'): log severe and do
+        not attach, as the Redis store does (api_key_requirement). It then
+        has no features, so every request gets 503.
+      steps:
+        - "seed its copy with the features the repository already holds: a store attached before it (Redis, say) may have loaded some, and those updates came before it subscribed. A seed with features makes it ready"
+        - subscribe to the repository's raw feature updates
+        - "load nothing into the repository (it has no features of its own); return at once"
+      order: >-
+        Like any store it is attached before the provider starts its
+        connection (feature-store.yaml store.provider_lifecycle), so it sees
+        FeatureHub's first full set.
+    copy:
+      what: "the features by id, as delivered: deep copies, strategies included"
+      on_update:   # raw feature updates, from every source but its own
+        FeaturesReceived: "replace the whole copy with the new set"
+        FeatureReceived: "apply featurehub-protocol.yaml repository.update_rule against the copy: ignore it if the held feature has a higher version, or the same version and the same value, v, id and type; otherwise replace (or add) it"
+        FeatureDeleted: "remove that id"
+      other_stores: >-
+        Updates from other stores (redis-store, local-yaml-store, ...) are
+        followed like FeatureHub's: they are the repository's features too.
+      sha: "after every change applied to the copy, recompute encoding.sha of it (the features' SHA, and its input, for encoding.snapshot_sha)"
+      clock_boundaries: "after every change applied to the copy, recompute its encoding.clock_boundaries (kept sorted, so counting them for a request is cheap); they change only when the copy does"
+    ready: >-
+      After its first full set (FeaturesReceived, or a seed with features).
+      Before then it has no snapshot to give: feature_snapshot fails with a
+      not-ready error and the server answers 503.
+    feature_snapshot:
+      description: "The function behind snapshot_api, called once per request."
+      steps:
+        - "now: read the clock once, first, before anything is evaluated (clock)"
+        - "map the context (featurehub-protocol.yaml encoding.evaluation_context); an invalid context is an error (the server answers 400)"
+        - "take the copy, its sha input and its clock boundaries as they are now (one consistent view)"
+        - "with a non-empty context: for each feature in the copy, ask the repository for that feature (by key) evaluated for the context at now, without value interceptors (server.evaluation.with_context.per_feature), and collect the results; a feature the repository no longer has (deleted meanwhile) is left out"
+        - "with no context: evaluate as for an empty context the same way (at now), or, if the caller asked for strategies (snapshot_api.parameters.includeStrategies), give the copy as delivered (server.evaluation.without_context)"
+        - "sha: encoding.snapshot_sha of the copy with the form (sendContext=true evaluated, sendContext=false as delivered) and the context's header (no header for no context, an empty one, or the as-delivered form)"
+        - "etag: encoding.etag from that sha and, unless the copy is given as delivered, the count of the copy's clock boundaries at or before now (the same reading, never a later one); returned with the snapshot, as the server cannot work it out from the snapshot (the body has the sha only)"
+      clock:
+        rule: >-
+          The store MUST read the clock once per request, before evaluating
+          anything, and use that one time, now, both for the evaluation
+          (rollout-strategies.yaml fhubWhenActive, and the current time a DATE
+          or DATETIME attribute uses when the context does not supply it) and
+          for the ETag's count. The repository's evaluation is given now (or
+          the store's clock is the repository's, fixed at now for the
+          request); it does not read the clock again.
+        why: >-
+          If the count came from a later reading than the evaluation, a
+          request straddling a boundary would get a body from before it with
+          an ETag from after it. Clients holding that ETag get 304 until the
+          next boundary, and after the last one (the end of a DATE's day, say)
+          there is none: they keep the old value until the features next
+          change.
+        fallback: >-
+          An SDK whose repository cannot be given the time MUST still read now
+          before evaluating and count with it. The body is then at least as
+          new as its ETag says; if it is newer, the cost is one extra 200 on
+          the client's next request, never a stale value.
+      consistency: >-
+        The copy follows the repository through raw feature updates, which
+        are delivered after notify returns, so the repository can be a moment
+        ahead of the copy. The fields of an evaluated feature come from the
+        repository's answer, so a snapshot can then hold a newer version than
+        its sha says. That is harmless: the store's sha changes when the
+        update reaches it, so the client's next request gets a 200 rather
+        than a 304.
+    close: "stop following updates and drop the copy"
+
   snapshot_api:
     description: >-
-      What every SDK that can act as a snapshot server MUST provide to the
-      server's own code, wherever the SDK turns a request's context into a
-      feature_snapshot: a function on the repository (or its equivalent),
-      and, if the SDK ships one, its ready-made HTTP handler. The choice
-      below MUST be offered, with the same default, at whichever of these
-      the server's code calls.
-    dart: "ClientFeatureRepository.featureSnapshot({Map<String, Object?>? context, bool includeStrategies = false}); no built-in handler (the example has its own)"
+      What every server SDK that can act as a snapshot server MUST provide
+      to the server's own code: a function on the snapshot store
+      (snapshot_store.feature_snapshot) that turns a request's context into
+      a feature_snapshot, and, if the SDK ships one, its ready-made HTTP
+      handler built on it. Neither is on the repository or in the core SDK
+      (placement). The choice below MUST be offered, with the same default,
+      at whichever of these the server's code calls.
+    dart: "FeatureSnapshotStore.featureSnapshot({Map<String, Object?>? context, bool includeStrategies = false}); no built-in handler (the example has its own)"
     go: >-
       snapshot.NewHandler(source, snapshot.WithStrategiesWithoutContext()):
       the choice is a handler option, off by default (evaluate), as these
-      rules require.
+      rules require; source is the Go snapshot store.
     parameters:
       context: >-
         An OpenFeature evaluation context in map form (featurehub-protocol.yaml
@@ -229,7 +550,9 @@ server:
       - "with no context and includeStrategies true: MUST give the features as delivered (server.evaluation.without_context): copies, strategies included"
       - "the default, when the caller does not say, MUST be false (evaluate): exposing every strategy and its values has to be asked for"
       - "an invalid context is an error (Dart: InvalidContextException), so the server can answer 400"
-      - "value interceptors are not applied; the sha is the repository SHA, whichever form is given"
+      - "before the store is ready, a not-ready error, so the server can answer 503"
+      - "value interceptors are not applied; the sha is encoding.snapshot_sha, which marks the form given (sendContext=true evaluated, sendContext=false as delivered)"
+      - "the function gives the snapshot's ETag (encoding.etag) as well as the snapshot, and the server MUST send that ETag, not one built from the body's sha: only the store knows the clock part. The time is read once, before evaluating (snapshot_store.feature_snapshot.clock). The function SHOULD take a clock, or the store be given one, so tests can fix the time"
     documentation: >-
       An SDK MUST document the choice where it documents the snapshot
       function, including server.evaluation.consequences: a server that
@@ -248,14 +571,16 @@ server:
       With a server-evaluated key, FeatureHub evaluates the features for the
       server's own single context and sends them without strategies.
       Evaluating those "for a request's context" changes nothing, so every
-      client would silently get the server's one context's values, and the
-      ETag (the SHA of ids and versions) would not reveal it.
+      client would silently get the server's one context's values; their
+      ETags would differ by context, but not their values.
     enforcement: >-
       A snapshot server MUST refuse to run with a server-evaluated key:
       either refuse to start, or answer every features request with an error
       (e.g. 500 or 503) rather than serve another context's values. The
-      reference example refuses to start. (For the same reason the Redis
-      store refuses to attach to a server-evaluated key.)
+      snapshot store refuses to attach (snapshot_store.attach.refuse_when),
+      which gives the second; the reference example also refuses to start.
+      (For the same reason the Redis store refuses to attach to a
+      server-evaluated key.)
     feature_stores_and_no_key: >-
       A server whose provider has no FeatureHub key (its features come from
       stores, or from another server with sendContext false) is fine as long
@@ -266,15 +591,17 @@ server:
 # ---------------------------------------------------------------------------
 client:
   description: >-
-    Fetches snapshots from the server and loads them into a repository.
-    Reference: FeatureSnapshotClient and FeatureSnapshotTransport in
-    lib/src/transport/snapshot_transport.dart (scheduling shared with
-    FeatureHub polling: lib/src/transport/polling_transport.dart).
+    Fetches snapshots from the server and loads them into a repository: the
+    transport a provider uses for a featuresUrl (placement.client). It
+    computes no SHA. Reference: FeatureSnapshotClient and
+    FeatureSnapshotTransport in lib/src/transport/snapshot_transport.dart
+    (scheduling shared with FeatureHub polling:
+    lib/src/transport/polling_transport.dart).
   configuration:
     url: {required: true, description: "Full URL of the endpoint; may already have query parameters."}
     send_context: {default: "true for app/browser (client) providers, false for server providers", description: "Send the repository's context as query parameters."}
     headers: {default: {}, description: "Sent with every request (gateway keys, auth, tracing)."}
-    interval: {description: "Poll interval; also how long a response stays fresh."}
+    interval: {description: "Poll interval; also how long a response stays fresh. 0 or at least 5 seconds (featurehub-protocol.yaml polling_transport.interval.minimum), or any value above 0 in test mode (featurehub-protocol.yaml polling_transport.interval.test_mode)."}
     request_timeout: {default: none, description: "Whole-request limit; exceeding it is an error (retried)."}
     connect_timeout: {default: none, description: "Only for an HTTP client the SDK creates."}
     http_client: {default: created, description: "Injectable (e.g. configured with a proxy)."}
@@ -305,7 +632,7 @@ client:
       action:
         - decode with encoding.feature_snapshot.decoding (a format error is an error, retried)
         - "if the request URL (i.e. the context) changed while waiting, discard the response"
-        - "store etag = response ETag header, or '\"' + snapshot.sha + '\"' if absent; remember the URL it belongs to"
+        - "store etag = response ETag header, or '\"' + snapshot.sha + '\"' if absent and the snapshot has a sha, or none (forget any stored ETag); remember the URL it belongs to"
         - "notify(features, snapshot.features) - a full set (featurehub-protocol.yaml transport.notifications)"
     - status: 304
       action: no change; update next_allowed
@@ -328,17 +655,43 @@ client:
 # 4. Conformance checks (each is a test in the reference implementation)
 # ---------------------------------------------------------------------------
 conformance:
+  - id: no-snapshot-in-core
+    check: "the core SDK has no function that builds a feature_snapshot and computes no SHA of the repository's features; the repository is unchanged by attaching a snapshot store"
   - id: snapshot-roundtrip
-    check: "decode(encode(snapshot)) loads the same features; the client's repository SHA equals the server's"
+    check: "decode(encode(snapshot)) loads the same features; the snapshot client's repository holds the snapshot store's features, and the sha it received is the store's"
+  - id: snapshot-sha-vectors
+    check: "encoding.snapshot_sha.test_vectors all reproduce; the evaluated (sendContext=true) and as-delivered (sendContext=false) forms of the same features have different shas, and neither equals featurehub-protocol.yaml encoding.sha"
+  - id: snapshot-form-etag
+    check: "a request with If-None-Match equal to the ETag of the evaluated form gets 200 with the strategies when the server now serves the same features as delivered, and the reverse"
+  - id: snapshot-clock-once
+    check: "with a clock that moves past an fhubWhenActive time (or the end of a DATE's day) between two readings, a snapshot's ETag count and its evaluated values agree: both use the one reading taken before evaluating, and the clock is read no more than once per request"
+  - id: snapshot-etag-clock
+    check: "encoding.etag.test_vectors all reproduce with a fixed clock; across a boundary the ETag changes and the body's sha does not; features with no clock boundaries, and snapshots served as delivered, have ETag \"<sha>\""
+  - id: conditional-304-clock
+    check: "a request with If-None-Match equal to the ETag from before a fhubWhenActive time gets 304 before the time and 200, with the new value and ETag, after it; If-None-Match with the sha alone gets 200 for features with clock boundaries"
+  - id: snapshot-sha-per-context
+    check: "the same features evaluated for two different contexts have different shas and ETags; the same context, its attributes given in any order, has the same sha"
+  - id: store-follows-repository
+    check: "after a full set, a feature update (higher version), a stale update (lower version, ignored) and a delete, the store's copy and sha match the repository's features"
+  - id: store-seeds
+    check: "a snapshot store attached after a store that loaded features (and before any connection) is ready with those features"
+  - id: store-refuses
+    check: "a snapshot store does not attach for a server-evaluated key, and feature_snapshot then gives a not-ready error (503)"
+  - id: store-not-ready
+    check: "before the store's first full set, feature_snapshot gives a not-ready error (503)"
   - id: evaluate-for-context
     given: "feature colour, value blue, strategy nz (country EQUALS nz) -> green"
     expect:
       "country=nz": {value: green, v: nz, strategies: absent}
       "country=au": {value: blue, v: null}
+  - id: evaluate-ignores-interceptors
+    check: "a value interceptor registered on the provider does not change any value in a snapshot"
   - id: conditional-304
-    check: "a request with If-None-Match equal to the ETag (alone, as W/\"...\", or in a comma list) gets 304; another tag gets 200"
+    check: "a request with If-None-Match equal to the ETag (alone, as W/\"...\", or in a comma list) gets 304; another tag gets 200; an ETag from another context gets 200"
   - id: client-if-none-match-per-url
     check: "after a context change the first request carries no If-None-Match"
+  - id: client-no-sha
+    check: "a 200 with no ETag header and no sha in the body loads the features and stores no ETag; the next request carries no If-None-Match"
   - id: client-discards-stale-context
     check: "a response that arrives after the context changed is not loaded"
   - id: client-rejection
