@@ -1,0 +1,206 @@
+# The end-to-end tests every FeatureHub SDK can run: a todo server, written in
+# any language with any FeatureHub SDK, is driven through its HTTP API while a
+# test harness changes features in FeatureHub and checks that the server
+# picked them up. A machine-readable specification, so the suite can be
+# implemented in any language and every implementation checks the same
+# things.
+#
+# It was taken out of the JavaScript SDK's cucumber tests
+# (featurehub-javascript-sdk, examples/todo-server-tests), which remain one
+# implementation of it. The Dart SDK's is the client provider's example
+# (featurehub-flutter-sdk, featurehub-openfeatures-client-sdk/example), as
+# standard Dart tests.
+#
+# MUST / SHOULD / MAY as in RFC 2119.
+
+spec:
+  name: featurehub-todo-server-tests
+  version: 1.0.0
+  status: implemented-in-dart
+  changelog:
+    - version: 1.0.0
+      changes:
+        - "First published version: the todo API, the harness, the environment it needs, how a change is awaited, and the scenarios of the JavaScript SDK's todo-server tests"
+  related:
+    feature_updates: featurehub-protocol.yaml featurehub_edge.feature_updates (how the harness changes features)
+    snapshot: feature-snapshot-protocol.yaml (the todo server's optional GET /features)
+    environment_variables: featurehub-protocol.yaml providers.environment_variables (names and duration grammar)
+
+# ---------------------------------------------------------------------------
+# Who takes part
+# ---------------------------------------------------------------------------
+roles:
+  todo_server: >-
+    The implementation under test: a todo server using a FeatureHub SDK (a
+    server-side SDK, normally with a client-evaluated key), evaluating
+    features for each request's user. Any language. It is what the
+    todo-api scenarios check, together with its SDK.
+  harness: >-
+    The tests. It changes features through FeatureHub with the feature
+    updater of the SDK it is written with, watches for each change with
+    that SDK's client (a provider, or a client of its own), then calls the
+    todo server. So it checks that SDK's updater and client too, whichever
+    server is under test.
+  featurehub: >-
+    A FeatureHub (for example the party server) with Edge, holding the
+    environment the todo server and the harness share.
+
+# ---------------------------------------------------------------------------
+# The environment both use
+# ---------------------------------------------------------------------------
+environment:
+  features:
+    - {key: FEATURE_TITLE_TO_UPPERCASE, type: BOOLEAN}
+    - {key: FEATURE_STRING, type: STRING}
+    - {key: FEATURE_NUMBER, type: NUMBER}
+    - {key: FEATURE_JSON, type: JSON}
+  initial_values: any; every scenario sets the values it depends on first, so the order of scenarios does not matter
+  api_key: >-
+    A client-evaluated key (containing '*') for the environment, whose
+    service account has READ, CHANGE_VALUE, LOCK and UNLOCK there: the
+    harness changes values and locks with it (feature_updates.permissions),
+    and the todo server, which serves many users, reads features with it.
+  variables:
+    APP_SERVER_URL: "the todo server, e.g. http://localhost:8099 (the default)"
+    FEATUREHUB_EDGE_URL: "Edge, for the harness's updater and client (required)"
+    FEATUREHUB_CLIENT_API_KEY: "the API key above (required)"
+    FEATUREHUB_CONNECT_INTERVAL: >-
+      optional, a duration (featurehub-protocol.yaml
+      providers.environment_variables.durations): set when the todo server
+      polls at that interval (the harness then polls too, at the same
+      interval, and waits longer: awaiting_a_change). Unset: both stream.
+    FEATUREHUB_SNAPSHOT_URL: >-
+      optional: the todo server's GET /features (todo_api.features). Set, the
+      harness's client reads its features from there instead of from Edge,
+      polling it at FEATUREHUB_CONNECT_INTERVAL (or every 5 seconds), so each
+      change goes FeatureHub -> todo server -> harness. Changes are still
+      made through Edge.
+  legacy: "the JavaScript harness also reads FEATUREHUB_POLLING_INTERVAL, in milliseconds; new harnesses read FEATUREHUB_CONNECT_INTERVAL only"
+
+# ---------------------------------------------------------------------------
+# The todo server's API, as the scenarios use it
+# ---------------------------------------------------------------------------
+todo_api:
+  todo: "{id: string, title: string, resolved: boolean}"
+  endpoints:
+    - {method: DELETE, path: "/todo/{user}", effect: "removes every todo of the user", response: "2xx"}
+    - {method: POST, path: "/todo/{user}", body: "{id, title} (resolved optional, false by default)", effect: "adds a todo", response: "2xx, the user's list as GET returns it"}
+    - {method: GET, path: "/todo/{user}", response: "200, the user's todos as a JSON array, each title processed (title_processing) for that user when it is read"}
+    - {method: GET, path: "/health/readiness", response: "200 once the server's provider is ready (has features), otherwise 5xx; the harness waits for it before the first scenario"}
+    - {method: GET, path: "/features", optional: true, response: "the features for the context in the query, as feature-snapshot-protocol.yaml (only for FEATUREHUB_SNAPSHOT_URL)"}
+  title_processing:
+    context: "each feature is evaluated for the context whose targetingKey (userkey) is the user in the path"
+    rules:   # applied in this order to the stored title
+      - "title is exactly buy and FEATURE_STRING has a value: title + ' ' + the string (an empty string gives 'buy ')"
+      - "title is exactly pay and FEATURE_NUMBER has a value: title + ' ' + the number, written as the shortest decimal that reads back as it, with no fraction for a whole number (1, 0, 507598.258978, -16746.43)"
+      - "title is exactly find and FEATURE_JSON has a value: title + ' ' + the value's foo field"
+      - "FEATURE_TITLE_TO_UPPERCASE is on: the whole title in upper case"
+    not_set: "a feature with no value (not set) changes nothing: the title stays as it is"
+
+# ---------------------------------------------------------------------------
+# How the harness works
+# ---------------------------------------------------------------------------
+harness:
+  updates: >-
+    Every change is a feature update (featurehub-protocol.yaml
+    featurehub_edge.feature_updates) with lock false and the new value
+    (unlock and set), or lock false and updateValue true to make it not set,
+    unless a scenario says otherwise. A setting update MUST succeed (applied
+    or unchanged); the scenario fails otherwise.
+  awaiting_a_change:
+    rule: >-
+      After a setting update, the harness waits until its own client sees
+      the new value (or that the feature is not set), re-reading at least
+      every 2 seconds, so the change has reached FeatureHub's clients before
+      the todo server is called.
+    timeout: "7 seconds when streaming; the poll interval + 4 seconds when polling; one poll interval more with FEATUREHUB_SNAPSHOT_URL"
+    lost_updates: "a lock change that has not arrived after 3 re-reads is sent again, as concurrent updates can be lost (feature_updates.concurrent_updates)"
+  list_contains:
+    rule: >-
+      "the list should contain T": GET /todo/{user} until one todo's title is
+      exactly T, re-reading every second for up to 20 seconds (the todo
+      server may see a change later than the harness, by up to its own poll
+      interval).
+  per_scenario: "a fresh user's list (DELETE /todo/{user}) before adding to it; any user name will do"
+  background: "before every scenario except boolean-on, FEATURE_TITLE_TO_UPPERCASE is set off (and awaited), so a scenario sees only the feature it sets"
+  after: "boolean-on sets FEATURE_TITLE_TO_UPPERCASE back off (and awaits it)"
+  tags:
+    todo-api: "changes features, then calls the todo server: these check the server under test and its SDK (and the harness's SDK)"
+    featurehub-only: "talks only to FeatureHub through the harness's SDK: they check its feature updater and client, and FeatureHub, never the todo server"
+
+# ---------------------------------------------------------------------------
+# The scenarios
+# ---------------------------------------------------------------------------
+scenarios:
+  # FEATURE_TITLE_TO_UPPERCASE
+  - {id: boolean-on, tag: todo-api, set: {FEATURE_TITLE_TO_UPPERCASE: true}, add: "Buy eggs", expect: "BUY EGGS"}
+  - {id: boolean-off, tag: todo-api, set: {FEATURE_TITLE_TO_UPPERCASE: false}, add: "Buy eggs", expect: "Buy eggs"}
+  # FEATURE_STRING
+  - {id: string-milk, tag: todo-api, set: {FEATURE_STRING: "milk"}, add: buy, expect: "buy milk"}
+  - {id: string-bread, tag: todo-api, set: {FEATURE_STRING: "bread"}, add: buy, expect: "buy bread"}
+  - {id: string-multiple-words, tag: todo-api, set: {FEATURE_STRING: "foo bar baz"}, add: buy, expect: "buy foo bar baz"}
+  - {id: string-empty, tag: todo-api, set: {FEATURE_STRING: ""}, add: buy, expect: "buy "}
+  - {id: string-not-set, tag: todo-api, set: {FEATURE_STRING: not_set}, add: buy, expect: "buy"}
+  # FEATURE_NUMBER
+  - {id: number-one, tag: todo-api, set: {FEATURE_NUMBER: 1}, add: pay, expect: "pay 1"}
+  - {id: number-decimal, tag: todo-api, set: {FEATURE_NUMBER: 507598.258978}, add: pay, expect: "pay 507598.258978"}
+  - {id: number-zero, tag: todo-api, set: {FEATURE_NUMBER: 0}, add: pay, expect: "pay 0"}
+  - {id: number-negative, tag: todo-api, set: {FEATURE_NUMBER: -16746.43}, add: pay, expect: "pay -16746.43"}
+  - {id: number-not-set, tag: todo-api, set: {FEATURE_NUMBER: not_set}, add: pay, expect: "pay"}
+  # FEATURE_JSON (the value is sent as its JSON text: feature_updates.request.body.value)
+  - {id: json-bar, tag: todo-api, set: {FEATURE_JSON: '{"foo":"bar"}'}, add: find, expect: "find bar"}
+  - {id: json-baz, tag: todo-api, set: {FEATURE_JSON: '{"foo":"baz"}'}, add: find, expect: "find baz"}
+  - {id: json-not-set, tag: todo-api, set: {FEATURE_JSON: not_set}, add: find, expect: "find"}
+
+  # the feature updater and locking
+  - id: boolean-lock
+    tag: featurehub-only
+    steps:
+      - "set FEATURE_TITLE_TO_UPPERCASE to true (unlocked): awaited as unlocked and on"
+      - "lock it (lock true, no value): awaited as locked and on"
+      - "update its value to false without unlocking (value only)"
+    expect: "the update does not succeed (SHOULD be notPossible, 412); the feature stays locked and on"
+  - id: boolean-rejects-string
+    tag: featurehub-only
+    steps: ["set FEATURE_TITLE_TO_UPPERCASE to the string foo (unlocked)"]
+    expect: "the update does not succeed (SHOULD be invalid, 400)"
+  - id: number-lock
+    tag: featurehub-only
+    steps:
+      - "set FEATURE_NUMBER to 26 (unlocked): awaited as unlocked and 26"
+      - "lock it: awaited as locked and 26"
+      - "update its value to 35 without unlocking"
+    expect: "the update does not succeed (SHOULD be notPossible, 412)"
+  - id: number-rejects-string
+    tag: featurehub-only
+    steps: ["set FEATURE_NUMBER to the string foo (unlocked)"]
+    expect: "the update does not succeed (SHOULD be invalid, 400)"
+  - id: string-lock
+    tag: featurehub-only
+    steps:
+      - "set FEATURE_STRING to ugg-boots (unlocked): awaited as unlocked and ugg-boots"
+      - "lock it: awaited as locked and ugg-boots"
+      - "update its value to run without unlocking"
+    expect: "the update does not succeed (SHOULD be notPossible, 412)"
+  - id: json-rejects-non-json
+    tag: featurehub-only
+    steps: ["set FEATURE_JSON to the string foo, which is not JSON (unlocked)"]
+    expect: "the update does not succeed (SHOULD be invalid, 400)"
+
+# ---------------------------------------------------------------------------
+# Running it
+# ---------------------------------------------------------------------------
+running:
+  order: "any; a lock scenario leaves its feature locked, and the next update of it unlocks it (harness.updates)"
+  modes:
+    - {name: streaming, todo_server: "streams (its SDK's default)", harness: "streams"}
+    - {name: polling, todo_server: "polls every 5 seconds (FEATUREHUB_CONNECT_INTERVAL=5s)", harness: "polls every 5 seconds"}
+    - {name: snapshot, optional: true, todo_server: "either", harness: "polls the todo server's GET /features (FEATUREHUB_SNAPSHOT_URL)"}
+  ci: >-
+    An SDK's end-to-end pipeline SHOULD run the todo-api scenarios against
+    its todo server in both modes, with its own harness and with another
+    SDK's (the JavaScript one), and its harness's featurehub-only scenarios
+    once.
+  implementations:
+    - {sdk: JavaScript, where: "featurehub-javascript-sdk examples/todo-server-tests", form: "cucumber; tags @todo-api and @featurehub-only"}
+    - {sdk: Dart, where: "featurehub-flutter-sdk featurehub-openfeatures-client-sdk/example", form: "package:test; tags todo-api and featurehub-only"}

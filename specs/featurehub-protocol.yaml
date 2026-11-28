@@ -32,10 +32,14 @@
 
 spec:
   name: featurehub-protocol
-  version: 1.1.2
+  version: 1.2.0
   sdk_version: 2
   status: implemented-in-dart
   changelog:
+    - version: 1.2.0
+      changes:
+        - "featurehub_edge.feature_updates: every SDK, client- and server-side, MUST provide a feature updater: PUT <host>/features/<apiKey>/<featureKey> with a FeatureStateUpdate (value, updateValue, lock), changing a feature's value or lock in an environment through Edge, as tests and test tools do. Its result is the outcome Edge answered (applied, unchanged, invalid, forbidden, not found, not possible, unavailable) and never an exception for an HTTP status"
+        - "todo-server-tests.yaml: the end-to-end suite (a todo server, an SDK's feature updater and its client) that every SDK can run, taken out of the JavaScript SDK's cucumber tests"
     - version: 1.1.2
       changes:
         - "featurehub_edge.sdk_version.generations: a request without sdk_version is generation 1. Edge honours Last-Event-ID, and holds quiet connections, only for sdk_version 2 or more; generation 1 always gets the full features on every connection. An SDK sends 2 only if it implements streaming.last_event_id in full, short_connections included"
@@ -1326,6 +1330,77 @@ featurehub_edge:
 # ---------------------------------------------------------------------------
 # 7. Conformance checks (each is a test in the reference implementation)
 # ---------------------------------------------------------------------------
+  feature_updates:
+    description: >-
+      Changing a feature's value or lock in an environment through Edge (the
+      "test API"), with the environment's API key: for tests, test tools and
+      end-to-end suites (todo-server-tests.yaml), not for resolving flags.
+      The change is made by FeatureHub: Edge accepts it and publishes it,
+      and it reaches every client, the updater's own included, later,
+      through their usual polling or streaming. An SDK's updater is
+      separate from its providers and repository: it changes nothing
+      locally.
+    support: >-
+      Every SDK, client- and server-side, MUST provide one (Dart:
+      FeatureHubFeatureUpdater in featurehub-openfeatures-common, exported by
+      both providers). It works with a client- or a server-evaluated key.
+    permissions: >-
+      The API key's service account needs, in that environment, the
+      CHANGE_VALUE permission to change a value, LOCK to lock and UNLOCK to
+      unlock (READ alone is not enough: 403). Edge checks them on every
+      request.
+    request:
+      method: PUT
+      url: >-
+        <host>/features/<apiKey>/<featureKey>: the host as configured (a
+        query string it carries is kept, after the path), the API key as it
+        is (its / separators are path separators, as in streaming), and the
+        feature key encoded as a path segment.
+      headers: "content-type: application/json, and the extra headers (extra_headers); no x-featurehub and no sdk_version: an update is not cached and does not identify a generation"
+      body:
+        schema: "FeatureStateUpdate: {value?: any, updateValue?: boolean, lock?: boolean}; absent and null are the same"
+        value: >-
+          The new value, when one is set: for a BOOLEAN feature true or
+          false (Edge also takes the strings "true" and "false", in any
+          case); for a NUMBER a JSON number (or a string holding a decimal
+          number); for a STRING a string; for a JSON feature a string
+          holding the JSON text, never a JSON object or array (Edge reads the
+          value as text: an object is not valid JSON there). An SDK whose
+          caller gives a JSON feature's value as a map or list MUST encode
+          it to its JSON text first.
+        updateValue: >-
+          true to change the value. A non-null value implies it (Edge sets it
+          itself), so it is only needed to clear the value: updateValue true
+          with no value makes the feature "not set" (not possible for a
+          BOOLEAN: 412).
+        lock: "true to lock, false to unlock, absent to leave the lock as it is. Unlocking and changing the value in one request is how a locked feature's value is changed"
+      nothing_to_do: "a body with no value, no updateValue and no lock is a 400; an SDK MAY refuse to send it"
+    responses:
+      "200": "applied: the change was accepted and published; it reaches the clients later (Edge's API definition says 201 for this; Edge answers 200, and an SDK MUST treat 200 and 201 alike)"
+      "201": applied (as 200)
+      "202": "unchanged: neither the value nor the lock would change"
+      "400": "invalid: nothing to do, or a value that is not valid for the feature's type (a flag set to anything but true or false, a number that is not a number, JSON that does not parse)"
+      "403": "forbidden: the key's service account lacks the permission the change needs (no write role, LOCK, UNLOCK or CHANGE_VALUE)"
+      "404": "not found: the API key, the environment or the feature does not exist"
+      "412": "not possible: changing a locked feature's value without unlocking it in the same request, or clearing a flag's value"
+      "503": "unavailable: updates are blocked for now (FeatureHub is in maintenance); its Retry-After says when to try again"
+      other: "failed: a 5xx, any other status, a network error or a timeout"
+    result: >-
+      The updater returns the outcome, never throwing for an HTTP status or a
+      network error: applied, unchanged, invalid, forbidden, notFound,
+      notPossible, unavailable (with the Retry-After delay, when one is
+      given) or failed; the status code (none for a network error or
+      timeout); and success = applied or unchanged (a 2xx). It MUST NOT retry
+      by itself: an update is a write, and whether to retry (after a 503's
+      Retry-After, or a conflicting update) is the caller's choice.
+    timeout: "a request timeout, as polling's requestTimeout; an SDK MAY default to a few seconds (the JavaScript SDK: 3)"
+    concurrent_updates: >-
+      FeatureHub applies updates with optimistic locking: an update that
+      races another to the same feature can be accepted (200) and then lost.
+      A caller that needs a change to have been made confirms it by watching
+      for it through a client (todo-server-tests.yaml awaiting_a_change),
+      and repeats it if it does not arrive.
+
 conformance:
   - id: sha-vectors
     check: encoding.sha.test_vectors all reproduce
@@ -1476,3 +1551,7 @@ conformance:
     check: "refreshIfStale fetches only after the interval; no requests of its own otherwise"
   - id: custom-transport
     check: "a user transport fills the repository, follows a context change, applies pushed updates, and a closed connection (bye) leaves the repository Ready, resolving from the last features"
+  - id: feature-update-request
+    check: "the updater sends PUT <host>/features/<apiKey>/<featureKey> with content-type application/json, the extra headers and a FeatureStateUpdate body: a value (a JSON feature's map or list as its JSON text), lock true or false, or updateValue true with no value to clear it; nothing else in the body; no sdk_version"
+  - id: feature-update-outcomes
+    check: "200 and 201 are applied, 202 unchanged, 400 invalid, 403 forbidden, 404 notFound, 412 notPossible, 503 unavailable with its Retry-After, and a 500, another status or a network error failed; none throws, and nothing is retried"
