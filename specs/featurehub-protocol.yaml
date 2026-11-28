@@ -44,11 +44,15 @@ spec:
         - "encoding.rollout_strategy.well_known_field_names.fhubWhenActive: a strategy attribute holding a UTC ISO-8601 date-time, compared with the SDK's clock using the attribute's conditional (EQUALS, NOT_EQUALS, GREATER, GREATER_EQUALS, LESS, LESS_EQUALS; any other never matches), its type ignored (rollout-strategies.yaml algorithm.well_known_attributes.fhubWhenActive); encoding.evaluation_context drops a context key of that name, so the application can never supply it"
         - "encoding.evaluation_context.context_sha: contextSha is defined once, with test vectors: the SHA-256 of the x-featurehub header as 64 lowercase hex characters, or 0 when there is no header (an empty header included). x_featurehub_header gains not_form_encoding, sorting and why_canonical: every SDK MUST build the same header, as the header's hash is a cache key; form encoders (space as +) and locale-aware sorting do not comply"
         - "repository.notifications.features: readiness is broadcast only when it changes (the initial Ready, and Stale -> Ready), not on every full set; repository.notifications.feature_changes: changed features have their own event, separate from readiness"
-        - "rollout-strategies.yaml fhubWhenActive uses the attribute's conditional (EQUALS, NOT_EQUALS, GREATER, GREATER_EQUALS, LESS, LESS_EQUALS; any other never matches) and ignores its type"
         - "featurehub_edge.extra_headers.precedence: If-None-Match (polling) and Last-Event-ID (streaming) are the SDK's own protocol headers, as x-featurehub is: an extra header with any of those names, in any case, is never sent"
         - "encoding.evaluation_context.wire_value: a date-time is UTC always; rollout-strategies.yaml reads a date-time without an offset as UTC, never local time"
         - "date-times are written to the second: encoding.evaluation_context.wire_value sends a date-time as YYYY-MM-DDTHH:MM:SSZ (any fraction dropped), and fhubWhenActive is written and compared at seconds precision (rollout-strategies.yaml)"
-        - "transport.helpers: repository.loadFeatureSnapshot and repository.featuresSha are not part of the repository (they were never in a released SDK, so there is nothing to deprecate), and encoding.sha is not the repository's: the core SDK computes no SHA of the features (only contextSha: encoding.evaluation_context.context_sha) and builds no snapshot. The Redis store and a server SDK's snapshot store compute it (feature-snapshot-protocol.yaml 2.0.0 placement); a transport receiving snapshots decodes them itself and notifies a full set"
+        - "transport.helpers: repository.loadFeatureSnapshot and repository.featuresSha are not part of the repository (they were never in a released SDK, so there is nothing to deprecate), and, in an SDK with separate client and server packages (JavaScript, Dart, Swift), encoding.sha is not the repository's: its core SDK computes no SHA of the features (only contextSha: encoding.evaluation_context.context_sha) and builds no snapshot. The Redis store and a server SDK's snapshot store compute it (feature-snapshot-protocol.yaml 2.0.0 placement). An SDK with a single package (Go, Python, Ruby, .NET) MAY keep the SHA and snapshot building on its repository or provider (placement.packaging.single). A transport receiving snapshots decodes them itself and notifies a full set"
+        - "repository.connection_events: how connection_failed and environment_stale reach listeners. Both flags and a subscription MUST be public on the repository and on the configuration a provider is built on; each event is broadcast once, after any readiness broadcast it causes; a listener added late is told at once; it is broadcast even while catch-and-release holds back readiness; a failing listener does not stop the others"
+        - "providers.initialisation: Ready succeeds; Failed is PROVIDER_FATAL; Stale with the connection stopped (it stopped with the first features) succeeds, with STALE after READY; anything else at the deadline, a context change in progress included, is ERROR (GENERAL). providers.stale_source: STALE comes from the connection events, never from readiness"
+        - "featurehub_edge.polling.edge_api: the extract is of Edge OpenAPI 1.2.0, which adds sdk_version to getFeatureStates and pollInterval to FeatureEnvironmentCollection, and requires FeatureState's version and type as non-nullable, with l optional and nullable, defaulting to false (encoding.feature_state.required_fields); a decoder still skips a feature without, or with a null, version or type"
+        - "featurehub_edge.polling.poll_interval replaces featurehub_edge.polling.cache_control: the server's polling interval override comes from the pollInterval field (whole seconds, nullable, optional) of each FeatureEnvironmentCollection in a 200 or 236 body, not from the Cache-Control header. Edge omits the field rather than send a value below 5, and SDKs ignore any below 5 regardless; of the environments' values of at least 5, the smallest is used; with none the configured interval applies again. SDKs MUST remove any code that reads Cache-Control max-age to change the interval (Edge still sends Cache-Control, for HTTP caches). FeatureHub never supported max-age as a polling signal and reading it is broken, so the removal is a MUST for every SDK, whatever sdk_version it sends (version 1 included)"
+        - "polling_transport.interval.test_mode: FEATUREHUB_TEST_POLLING=true is test mode, for test processes only: any poll interval above 0 is allowed (500ms, say), in code, in FEATUREHUB_CONNECT_INTERVAL and for the snapshot client, and a FeatureHub pollInterval of at least 1 second is used. It is the only way the minimum may be lowered outside an SDK's own tests (providers.environment_variables.names.test)"
     - version: 1.1.2
       changes:
         - "featurehub_edge.sdk_version.generations: a request without sdk_version is generation 1. Edge honours Last-Event-ID, and holds quiet connections, only for sdk_version 2 or more; generation 1 always gets the full features on every connection. An SDK sends 2 only if it implements streaming.last_event_id in full, short_connections included"
@@ -62,11 +66,6 @@ spec:
         - "providers.context_change.single_context: a provider that sends the context (a server-evaluated key, or sendContext) has exactly one active context, in every SDK. A context change blocks every resolution until the new context's features arrive, and no resolution is answered from the previous context's features as the new one's: asynchronous resolutions wait (up to waitForReady, then PROVIDER_NOT_READY, and the next waits again); synchronous ones return the previous context's values with the reason STALE until waitForReady has passed, then PROVIDER_NOT_READY. Once the source has stopped for good, the last features serve only the context they belong to; any other gets PROVIDER_NOT_READY (it previously got the last features)"
     - version: 1.1.1
       changes:
-        - "repository.connection_events: how connection_failed and environment_stale reach listeners. Both flags and a subscription MUST be public on the repository and on the configuration a provider is built on; each event is broadcast once, after any readiness broadcast it causes; a listener added late is told at once; it is broadcast even while catch-and-release holds back readiness; a failing listener does not stop the others"
-        - "providers.initialisation: Ready succeeds; Failed is PROVIDER_FATAL; Stale with the connection stopped (it stopped with the first features) succeeds, with STALE after READY; anything else at the deadline, a context change in progress included, is ERROR (GENERAL). providers.stale_source: STALE comes from the connection events, never from readiness"
-        - "featurehub_edge.polling.edge_api: the extract is of Edge OpenAPI 1.2.0, which adds sdk_version to getFeatureStates and pollInterval to FeatureEnvironmentCollection, and requires FeatureState's version and type as non-nullable, with l optional and nullable, defaulting to false (encoding.feature_state.required_fields); a decoder still skips a feature without, or with a null, version or type"
-        - "featurehub_edge.polling.poll_interval replaces featurehub_edge.polling.cache_control: the server's polling interval override comes from the pollInterval field (whole seconds, nullable, optional) of each FeatureEnvironmentCollection in a 200 or 236 body, not from the Cache-Control header. Edge omits the field rather than send a value below 5, and SDKs ignore any below 5 regardless; of the environments' values of at least 5, the smallest is used; with none the configured interval applies again. SDKs MUST remove any code that reads Cache-Control max-age to change the interval (Edge still sends Cache-Control, for HTTP caches). FeatureHub never supported max-age as a polling signal and reading it is broken, so the removal is a MUST for every SDK, whatever sdk_version it sends (version 1 included)"
-        - "polling_transport.interval.test_mode: FEATUREHUB_TEST_POLLING=true is test mode, for test processes only: any poll interval above 0 is allowed (500ms, say), in code, in FEATUREHUB_CONNECT_INTERVAL and for the snapshot client, and a FeatureHub pollInterval of at least 1 second is used. It is the only way the minimum may be lowered outside an SDK's own tests (providers.environment_variables.names.test)"
         - "featurehub_edge.streaming.last_event_id: SSE clients keep the last event id and send it as Last-Event-ID on reconnection (not for a new context). Edge then sends no features if nothing is new: it holds the connection (typically 60 seconds, up to 3 to 5 minutes), possibly silent, then sends bye and closes, so several reconnections may bring no updates. A bye ends a connection cleanly and resets the failure count (attempt_reset); read timeouts SHOULD exceed 5 minutes"
         - "providers.environment_variables: FEATUREHUB_CONNECT_TYPE (active, passive or streaming) and FEATUREHUB_CONNECT_INTERVAL replace FEATUREHUB_POLLING_INTERVAL and FEATUREHUB_POLLING_PASSIVE, and give the default mode and interval (mode_selection). Active and passive both need an interval, in code or from FEATUREHUB_CONNECT_INTERVAL (passive no longer defaults to 0); streaming does not use it"
         - "providers.environment_variables.durations.connect_interval: FEATUREHUB_CONNECT_INTERVAL is a single number followed by a time unit (ms, s, m, h), and is 0 (connect once and stop) or at least 5 seconds"
@@ -209,9 +208,14 @@ encoding:
       Identifies a set of features by their ids and versions only (not values).
       Computed the same way by every component that needs it: the Redis store
       (its sha key) and a server SDK's snapshot store (the snapshot's sha and
-      ETag, feature-snapshot-protocol.yaml encoding.snapshot_sha). The core
-      SDK, the repository included, MUST NOT compute it
-      (feature-snapshot-protocol.yaml placement).
+      ETag, feature-snapshot-protocol.yaml encoding.snapshot_sha). In an SDK
+      with separate client and server packages (JavaScript, Dart, Swift) the
+      core SDK, the repository included, MUST NOT compute it; an SDK with a
+      single package (Go, Python, Ruby, .NET) MAY keep it on its repository
+      (feature-snapshot-protocol.yaml placement.packaging). Where the
+      packages are separate, the function lives in the server SDK (Dart:
+      featurehub-openfeatures-server-sdk), and a store that needs it (the
+      Redis store, server-only) depends on the server SDK for it.
     algorithm:
       - take the features (the set the component holds; keys that code has only asked for, with no feature, are excluded)
       - sort by `id`, ascending, by plain string comparison (UTF-16 code unit order; equal to code point order for BMP ids)
@@ -221,8 +225,10 @@ encoding:
     when_recomputed: >-
       By the component that holds it, after every change to the features it
       holds (for the stores, as they follow the repository's raw feature
-      updates: feature-store.yaml raw_feature_updates). The repository keeps
-      no SHA.
+      updates: feature-store.yaml raw_feature_updates). In a split SDK the
+      repository keeps no SHA; a single-package SDK's repository that keeps
+      one recomputes it after every applied change (a full set, a single
+      feature, a delete).
     test_vectors:
       - features: []
         input: ""
@@ -641,14 +647,20 @@ transport:
       reports STALE and readiness goes from Ready to Stale (repository.environment_stale).
   helpers:
     rule: >-
-      None. The repository has no snapshot helpers: no loadFeatureSnapshot
-      and no featuresSha (neither was ever in a released SDK). A transport that receives snapshots
+      None in an SDK with separate client and server packages: its
+      repository has no snapshot helpers, no loadFeatureSnapshot and no
+      featuresSha (neither was ever in a released SDK). A single-package SDK
+      MAY keep a features SHA, and functions that build snapshots, on its
+      repository or provider for its own snapshot server
+      (feature-snapshot-protocol.yaml placement.packaging.single), but not a
+      loadFeatureSnapshot for transports. A transport that receives snapshots
       (the snapshot client, or a custom one) decodes them itself
       (feature-snapshot-protocol.yaml encoding.feature_snapshot.decoding) and
       gives their features as a full set with notify(features); it uses the
       sha the server sent, and computes none. Building snapshots and their
-      SHA belongs to a server SDK's snapshot store
-      (feature-snapshot-protocol.yaml placement).
+      SHA belongs to a server SDK's snapshot store in a split SDK, and to the
+      one package in a single-package SDK (feature-snapshot-protocol.yaml
+      placement).
   notifications:   # the only calls a transport needs to make
     - {call: "notify(features, list)", when: "a full set; the first makes the provider ready"}
     - {call: "notify(feature, one)", when: one feature added or updated}
@@ -691,14 +703,18 @@ providers:
     - {given: "only stores", transport: "none; features come from stores"}
   default_mode:
     description: >-
-      The mode a provider (or connection) uses when the application gives
-      none, in code or, in a server-side SDK, through
-      FEATUREHUB_CONNECT_TYPE and FEATUREHUB_CONNECT_INTERVAL
-      (environment_variables.mode_selection, which comes first).
+      The mode a provider uses when the application gives none, in code or,
+      in a server-side SDK, through FEATUREHUB_CONNECT_TYPE and
+      FEATUREHUB_CONNECT_INTERVAL (environment_variables.mode_selection,
+      which comes first). It depends on the kind of provider, client-side or
+      server-side, not on the key: client- and server-evaluated keys default
+      alike, except where an SDK cannot stream a server-evaluated key.
     server_side: >-
       Streaming, for a client-evaluated key, and for a server-evaluated key
       in an SDK that supports server-evaluated streaming
-      (featurehub_edge.streaming.server_evaluated). In one that does not, a
+      (featurehub_edge.streaming.server_evaluated), unless the provider has
+      a poll interval (in code or FEATUREHUB_CONNECT_INTERVAL), when it polls
+      actively. In one that does not, a
       server-evaluated key has no default: the mode MUST be chosen, and
       without one it is a validation error (validation_errors). On a server,
       client-evaluated keys are the norm (a server-evaluated key gives the
@@ -714,6 +730,9 @@ providers:
       needs them, so a refresh then is enough, and it holds no connection
       open.
     featuresUrl: "your own server is only polled: activePolling, for the providers and FeatureHubConnection alike, unless a client-side SDK documents another polling default (Dart's client provider: passivePolling)"
+    connection: >-
+      An SDK's lower-level connection (Dart: FeatureHubConnection) MAY keep
+      its own default; the providers always give it the mode they chose.
   validation_errors:
     - only one of host/apiKey given (empty strings count as not given)
     - featuresUrl together with host or apiKey
@@ -723,29 +742,6 @@ providers:
     - "nothing to get features from (no host+apiKey, featuresUrl, transportFactory or stores)"
     - "server provider: activePolling or passivePolling without a pollInterval (0 is a valid interval: poll once, polling_transport.interval.zero_polls_once)"
     - "a negative pollInterval, or one between 0 and 5 seconds (activePolling or passivePolling, FeatureHub or your own server; polling_transport.interval.minimum), unless test mode is on (polling_transport.interval.test_mode)"
-  default_mode:
-    description: >-
-      The mode a provider uses when none is given, in code or (server-side)
-      by the environment (environment_variables.mode_selection). It depends
-      on the kind of provider, not on the key: client- and server-evaluated
-      keys default alike.
-    client_side: >-
-      A client-side provider (an app, a browser; Dart's
-      featurehub-openfeatures-client provider) defaults to activePolling, at
-      its default poll interval (Dart: 30 seconds), for any key and for a
-      featuresUrl. Polling suits apps: they are often suspended or offline,
-      and a poll needs no connection held open.
-    server_side: >-
-      A server-side provider (Dart's featurehub-openfeatures-server provider)
-      defaults to streaming, for any key, unless it has a poll interval (in
-      code or FEATUREHUB_CONNECT_INTERVAL), when it polls actively. A
-      featuresUrl is never streamed, so it polls actively and needs an
-      interval. In an SDK that does not support server-evaluated streaming
-      (featurehub_edge.streaming.server_evaluated), a server-evaluated key
-      has no default: its mode must be given (validation_errors).
-    connection: >-
-      An SDK's lower-level connection (Dart: FeatureHubConnection) MAY keep
-      its own default; the providers always give it the mode they chose.
   environment_variables:
     description: >-
       The environment variables an SDK reads its configuration from, so that

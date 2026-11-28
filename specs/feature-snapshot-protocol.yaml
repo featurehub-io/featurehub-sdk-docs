@@ -4,9 +4,11 @@
 # own clients, and how those clients fetch them. It is not FeatureHub's
 # protocol: neither side talks to FeatureHub Edge here. Describes, precisely
 # enough to reimplement in another language:
-#   0. where the code lives (placement): only a server SDK serves
-#      snapshots, through a feature store; nothing in the core SDK builds a
-#      snapshot or computes the features' SHA;
+#   0. where the code lives (placement): in an SDK with separate client and
+#      server packages (JavaScript, Dart, Swift) only the server package
+#      serves snapshots, through a feature store, and nothing in the shared
+#      core builds a snapshot or computes the features' SHA; an SDK with a
+#      single package (Go, Python, Ruby, .NET) keeps them in that package;
 #   1. the encoding (FeatureSnapshot, its sha and its ETag);
 #   2. the snapshot server, the snapshot store, and the function it gives
 #      the server's code;
@@ -25,38 +27,37 @@
 # https://github.com/featurehub-io/featurehub-flutter-sdk, unless another
 # repository is named.
 #
-# Reference implementation: the Dart SDK. Version 2.0.0 moves the server
-# side out of the core; until the Dart SDK follows, it has (1.0.0)
-#   featurehub-openfeatures-common (lib/src/feature_snapshot.dart,
-#   lib/src/transport/snapshot_transport.dart,
-#   ClientFeatureRepository.featureSnapshot and featuresSha in
-#   lib/src/repository.dart), and
-#   the server example featurehub-openfeatures-server-sdk/example/main.dart
-#   (GET /features).
-# Where 2.0.0 puts them: the snapshot client stays a transport in
-# featurehub-openfeatures-common; the snapshot store (server.snapshot_store),
-# the snapshot's sha and its encoding go to featurehub-openfeatures-server-sdk;
-# the repository loses featureSnapshot, featuresSha and loadFeatureSnapshot
-# (none of them was ever in a released SDK).
+# Reference implementation: the Dart SDK. The snapshot client and the
+#   snapshot reader stay in featurehub-openfeatures-common
+#   (lib/src/transport/snapshot_transport.dart, lib/src/feature_snapshot.dart);
+#   the snapshot store, the snapshot's sha and the features' SHA are in
+#   featurehub-openfeatures-server-sdk (lib/src/feature_snapshot_store.dart,
+#   lib/src/features_sha.dart), and the server example
+#   featurehub-openfeatures-server-sdk/example/main.dart serves GET /features
+#   from a FeatureSnapshotStore. The repository has no featureSnapshot,
+#   featuresSha or loadFeatureSnapshot (none of them was ever in a released
+#   SDK).
 #
 # Conventions: MUST / SHOULD / MAY as in RFC 2119. "repository" is the local
 # in-memory store of features that resolutions read from. "core SDK" is the
-# package every provider, client or server, is built on (Dart:
-# featurehub-openfeatures-common). Everything marked `reference_behaviour` is
+# package every provider, client or server, is built on, in an SDK that has
+# separate client and server packages (Dart: featurehub-openfeatures-common);
+# an SDK with a single package has no core apart from it (placement.packaging).
+# Everything marked `reference_behaviour` is
 # what the Dart SDK does; implementations SHOULD match it so clients and
 # servers in different languages interoperate.
 
 spec:
   name: feature-snapshot-protocol
   version: 2.0.0
-  status: specified; the Dart SDK implements 1.0.0
+  status: implemented-in-dart
   changelog:
     - version: 2.0.0
       changes:
         - "encoding.etag.clock_part: an evaluated snapshot's result can change with the server's clock (rollout-strategies.yaml fhubWhenActive, a fixed point in time from the attribute that the server's clock is compared against; and, separately, DATE / DATETIME attributes the context does not supply, which use the current time) with no change to the features or the context, so its ETag is \"<sha>_t<count>\": count is the number of the features' clock boundaries (encoding.clock_boundaries) at or before the server's clock. Features without any boundaries, and snapshots served as delivered (without_context), keep \"<sha>\". The sha (encoding.snapshot_sha) does not include the count; clients treat the ETag as opaque"
         - "encoding.etag.format: the clock part is _t<count>, the form FeatureHub Edge's time-aware etags for server-evaluated keys use"
         - "server.snapshot_store.copy.clock_boundaries: the store works out the boundaries whenever its copy changes; feature_snapshot gives the ETag with the snapshot, and the store SHOULD offer the ETag for a context on its own for the If-None-Match check, which still needs no evaluation"
-        - "placement: the core SDK MUST NOT build snapshots or compute SHAs. ClientFeatureRepository.featureSnapshot, repository.featuresSha and repository.loadFeatureSnapshot are removed (featurehub-protocol.yaml transport.helpers; none was ever in a released SDK). Only a server SDK serves snapshots, through a feature store (server.snapshot_store); everything else in the SDK stays as it is. Clients need nothing new: the snapshot client is the transport for a featuresUrl, an alternative to the FeatureHub Edge transports"
+        - "placement: in an SDK with separate client and server packages (JavaScript, Dart, Swift: placement.packaging.split), the shared core MUST NOT build snapshots or compute SHAs. ClientFeatureRepository.featureSnapshot, repository.featuresSha and repository.loadFeatureSnapshot are removed there (featurehub-protocol.yaml transport.helpers; none was ever in a released SDK), and only the server package serves snapshots, through a feature store (server.snapshot_store). An SDK with a single package (Go, Python, Ruby, .NET: placement.packaging.single) keeps snapshot support and the features' SHA in that package, on its repository and provider if it likes, as nothing is kept out of a separate client. Everything else in the SDK stays as it is. Clients need nothing new: the snapshot client is the transport for a featuresUrl, an alternative to the FeatureHub Edge transports"
         - "server.snapshot_store: a feature store that follows the repository's raw feature updates, keeps its own copy of the features and their sha, and, for a context, asks the repository for each feature in turn (openfeature-resolution.yaml evaluation, without the interceptors step)"
         - "encoding.snapshot_sha: a snapshot's sha covers its form and the context it was evaluated for: the SHA-256 of the features' SHA input, \"|sendContext=true\" (evaluated) or \"|sendContext=false\" (served as delivered, strategies included), and, for a context, \"|\" and the context's canonical x-featurehub header (the ordered form contextSha hashes). The two forms of the same features never share a sha or an ETag, and a snapshot's sha is never featurehub-protocol.yaml encoding.sha. encoding.etag.why_valid replaces why_valid_per_url: the ETag no longer depends on the context being in the URL"
         - "server.snapshot_store.feature_snapshot.clock: the store reads the clock once per request, before evaluating anything, and uses that one reading for the evaluation (fhubWhenActive and DATE / DATETIME attributes the context does not supply) and for the ETag's count, so a body is never older than its ETag"
@@ -85,7 +86,38 @@ spec:
 # 0. Placement: where the snapshot code lives
 # ---------------------------------------------------------------------------
 placement:
+  packaging:
+    description: >-
+      Where snapshot support may live depends on how the SDK is packaged.
+      The wire format, the sha and ETag (encoding), the server's behaviour
+      (server) and the snapshot client (client) are the same for both
+      kinds: only the placement of the code differs.
+    split: >-
+      An SDK with separate client and server packages built on a shared
+      core (JavaScript, Dart, Swift): the core rules below (core, server,
+      extra_support) apply. Client packages, which applications in browsers
+      and on phones ship, are built on the core, so the core carries nothing
+      only a server uses.
+    single: >-
+      An SDK with a single package, which servers use, with no separate
+      client package (Go, Python, Ruby, .NET): the core rules do not apply.
+      Snapshot support, and the features' SHA (featurehub-protocol.yaml
+      encoding.sha), MAY be in that package, on the repository and the
+      provider if that suits the SDK (Go: Config.FeatureSnapshot and
+      Config.FeaturesSHA, served by snapshot.NewHandler), or in a snapshot
+      store as split SDKs have it. Either way it MUST behave as
+      server.snapshot_store specifies: the sha is encoding.snapshot_sha (its
+      form and context included, never only encoding.sha), the ETag has its
+      clock part (encoding.etag), the clock is read once per request
+      (server.snapshot_store.feature_snapshot.clock), value interceptors are
+      not applied, and it is not ready (503) before the first features.
+    why_single_differs: >-
+      The core rule exists to keep server-only code out of what clients
+      ship. A single-package SDK ships no separate client, so there is
+      nothing to keep it out of, and a separate store would only hold a
+      second copy of the features the repository already has.
   core:
+    applies_to: split SDKs only (packaging.split)
     rule: >-
       The core SDK MUST NOT contain snapshot support: no function on the
       repository (or anywhere in the core) that builds a feature_snapshot or
@@ -97,6 +129,7 @@ placement:
       and keeps code every client ships (browser and mobile included) free
       of what only a server uses.
   server:
+    applies_to: split SDKs only (packaging.split); a single-package SDK serves them from its one package (packaging.single)
     rule: >-
       Only a server SDK (Dart: featurehub-openfeatures-server-sdk) serves
       snapshots, and it does so with a feature store, the snapshot store
@@ -107,6 +140,7 @@ placement:
       changes: the repository, the transports, the providers and the
       resolution of flags are exactly as without it.
   client:
+    applies_to: every SDK
     rule: >-
       A client needs nothing new. The snapshot client (client) is the
       transport a provider uses for a featuresUrl (featurehub-protocol.yaml
@@ -114,8 +148,12 @@ placement:
       transports through the transport contract (featurehub-protocol.yaml
       transport). It decodes each snapshot and gives its features to the
       repository as a full set (notify(features)); it computes no SHA, using
-      the server's ETag (or the snapshot's sha) as it is.
+      the server's ETag (or the snapshot's sha) as it is. In a
+      single-package SDK the repository may still keep its own SHA for the
+      SDK's snapshot server, but the snapshot client never uses it as a
+      validator.
   extra_support:
+    applies_to: split SDKs only (packaging.split)
     rule: >-
       An SDK MAY expose extra support for snapshots beyond the snapshot
       client (the JavaScript SDK, for example, may offer helpers for reading
@@ -171,8 +209,9 @@ encoding:
   snapshot_sha:
     description: >-
       The sha a snapshot carries, and its ETag. Computed only by the
-      snapshot store (server.snapshot_store), never by the core SDK or a
-      client. It extends featurehub-protocol.yaml encoding.sha with the
+      snapshot server's code: the snapshot store (server.snapshot_store) in
+      a split SDK, never its core; in a single-package SDK, that package
+      (placement.packaging). Never by a client. It extends featurehub-protocol.yaml encoding.sha with the
       snapshot's form (sendContext) and the context the snapshot was
       evaluated for, written the same canonical, ordered way that contextSha
       hashes it, so a snapshot for one context never has the sha of
@@ -442,12 +481,14 @@ server:
   snapshot_store:
     description: >-
       A feature store (feature-store.yaml store) in the server SDK, which
-      turns the repository's features into snapshots. It supplies no
+      turns the repository's features into snapshots. A single-package SDK
+      MAY instead build snapshots from its repository directly
+      (placement.packaging.single), behaving as this section specifies. It supplies no
       features: it only follows the repository's raw feature updates
       (feature-store.yaml raw_feature_updates), keeps its own copy of the
       features as delivered, in its own snapshot type, with their sha, and
-      builds each request's snapshot from that copy. It is the only place in
-      an SDK that computes encoding.snapshot_sha or assembles a
+      builds each request's snapshot from that copy. In a split SDK it is the
+      only place that computes encoding.snapshot_sha or assembles a
       feature_snapshot (placement).
     dart: "FeatureSnapshotStore in featurehub-openfeatures-server-sdk (replacing ClientFeatureRepository.featureSnapshot)"
     source: "snapshot-store (it never notifies the repository, so nothing of its own comes back to it)"
@@ -526,14 +567,17 @@ server:
       to the server's own code: a function on the snapshot store
       (snapshot_store.feature_snapshot) that turns a request's context into
       a feature_snapshot, and, if the SDK ships one, its ready-made HTTP
-      handler built on it. Neither is on the repository or in the core SDK
-      (placement). The choice below MUST be offered, with the same default,
+      handler built on it. In a split SDK neither is on the repository or in
+      the core SDK (placement); a single-package SDK MAY put the function on
+      its provider (placement.packaging.single). The choice below MUST be offered, with the same default,
       at whichever of these the server's code calls.
     dart: "FeatureSnapshotStore.featureSnapshot({Map<String, Object?>? context, bool includeStrategies = false}); no built-in handler (the example has its own)"
     go: >-
       snapshot.NewHandler(source, snapshot.WithStrategiesWithoutContext()):
       the choice is a handler option, off by default (evaluate), as these
-      rules require; source is the Go snapshot store.
+      rules require; source is normally the provider (*core.Config), whose
+      FeatureSnapshot and FeaturesSHA give the snapshot, as Go is a
+      single-package SDK (placement.packaging.single).
     parameters:
       context: >-
         An OpenFeature evaluation context in map form (featurehub-protocol.yaml
@@ -656,7 +700,9 @@ client:
 # ---------------------------------------------------------------------------
 conformance:
   - id: no-snapshot-in-core
-    check: "the core SDK has no function that builds a feature_snapshot and computes no SHA of the repository's features; the repository is unchanged by attaching a snapshot store"
+    check: "(split SDKs only: placement.packaging.split) the core SDK has no function that builds a feature_snapshot and computes no SHA of the repository's features; the repository is unchanged by attaching a snapshot store"
+  - id: single-package-snapshots
+    check: "(single-package SDKs: placement.packaging.single) wherever the snapshot is built, its sha and ETag reproduce encoding.snapshot_sha and encoding.etag's test vectors, value interceptors are not applied, and before the first features it is not ready (503)"
   - id: snapshot-roundtrip
     check: "decode(encode(snapshot)) loads the same features; the snapshot client's repository holds the snapshot store's features, and the sha it received is the store's"
   - id: snapshot-sha-vectors

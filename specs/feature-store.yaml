@@ -28,12 +28,14 @@
 spec:
   name: featurehub-feature-store
   version: 1.1.0
-  status: implemented-in-dart (the snapshot store is specified, not yet implemented)
+  status: implemented-in-dart
   changelog:
     - version: 1.1.0
       changes:
-        - "snapshot_store: a server SDK's snapshot store is a feature store that supplies no features and follows the repository's raw feature updates to build snapshots (feature-snapshot-protocol.yaml server.snapshot_store); raw_feature_updates.sources gains snapshot-store"
+        - "snapshot_store: a server SDK's snapshot store (in an SDK with separate client and server packages; a single-package SDK may build snapshots from its repository instead) is a feature store that supplies no features and follows the repository's raw feature updates to build snapshots (feature-snapshot-protocol.yaml server.snapshot_store); raw_feature_updates.sources gains snapshot-store"
         - "redis_store: computes the SHA itself; the repository no longer keeps one (featurehub-protocol.yaml encoding.sha)"
+        - "redis_store.on_update and write: removals reach Redis. A deletion removes the feature by id even if another process wrote first, and a full set removes the features this process last saw in Redis that it leaves out (one another process added since is kept): a three-way merge against last_features. This replaces the TypeScript behaviour (a full set that only removes features was not written, and a deletion was skipped after another process wrote), which kept deleted features in Redis"
+        - "local_storage_store: for a key that sends the context (a server-evaluated key, or sendContext), each context's features are stored apart (the storage key ends ?contextSha=<contextSha>), and a start loads only those of the context it starts with: a provider has one active context (featurehub-protocol.yaml providers.context_change.single_context), so another context's features are never resolved as its own"
     - version: 1.0.0
       changes:
         - "First published version."
@@ -165,7 +167,12 @@ repository_rules:
 local_storage_store:
   platform: browsers (sessionStorage by default, or localStorage)
   source: local-session-store
-  storage_key: "target.featureUrl, or \"featurehub-features\" if that is null"
+  storage_key: >-
+    target.featureUrl, or "featurehub-features" if that is null. For a key
+    that sends the context (target.sendsContext: a server-evaluated key, or
+    sendContext), "?contextSha=" and the context's contextSha
+    (featurehub-protocol.yaml encoding.evaluation_context.context_sha) are
+    appended: each context's features are kept apart.
   format: >-
     One storage item: a JSON object mapping each feature's id to its
     FeatureState JSON. Same key and format as the TypeScript SDK's store.
@@ -173,25 +180,26 @@ local_storage_store:
     key: https://edge.example.com/features/default/a1b2c3/key
     value: '{"fv-pastry":{"id":"fv-pastry","key":"kwong-pastry","l":false,"version":2,"type":"STRING","value":"mango"}}'
   attach:
-    - read the item; if it is absent, unreadable or not a JSON object, start empty (no error)
+    - "read the item (for a key that sends the context, the item of the context the provider starts with: target.contextHeader); if it is absent, unreadable or not a JSON object, start empty (no error)"
     - otherwise notify(features, the stored features, source = local-session-store)
     - follow raw feature updates
   on_update:   # events from other sources
+    context: "for a key that sends the context, the item is the current context's (the repository's client context when the update arrives); when the context has changed, the map starts empty for the new item"
     FeaturesReceived: replace the whole map with the new set
     FeatureReceived: set map[id] = the feature
     FeatureDeleted: remove map[id]
     then: write the item; a write failure (storage full or disabled) is logged and ignored
   difference_from_typescript: a deleted feature is removed from storage; the TypeScript store keeps it, so a reload could bring a deleted flag back
   note: >-
-    For a server-evaluated key the stored features are those evaluated for
-    the context at the time; a later context starts with them until
-    FeatureHub answers.
+    For a server-evaluated key FeatureHub evaluates the features for a
+    context, so they belong to that context: a start with another context
+    finds no item of its own, and waits for FeatureHub.
 
 # ---------------------------------------------------------------------------
 # 5. Redis store (RedisFeatureStore)
 # ---------------------------------------------------------------------------
 redis_store:
-  platform: servers (dart:io); Redis Cluster not supported
+  platform: "servers (dart:io); Redis Cluster not supported. It takes the SHA function from the server SDK (featurehub-protocol.yaml encoding.sha)"
   source: redis-store
   purpose: >-
     Several processes share one copy of an environment's features; each
@@ -220,32 +228,31 @@ redis_store:
   serialisation: all Redis operations for a store run one at a time, in order
   on_update:   # events from other sources
     FeaturesReceived:
-      - compute the incoming SHA (the store computes it; the repository keeps none); if it equals the stored sha, do nothing
-      - "if Redis has features and none of the incoming is newer (by id, version), do nothing"
-      - otherwise write the incoming features
-      - "note: as in the TypeScript SDK, a full set that only removes features (nothing newer) is not written"
+      - "removed: the ids in last_features that the set leaves out (a feature another process added since this one last read is not in last_features, so it is kept)"
+      - write the incoming features, removing removed
     FeatureReceived:
-      - "if Redis holds that id at the same or a higher version, do nothing"
-      - otherwise write the stored features with this one replacing (or added to) them
+      - write the feature (nothing removed)
     FeatureDeleted:
-      - if Redis does not hold that id, do nothing
-      - otherwise write the stored features without it
-  write:   # optimistic locking
+      - "removed: the stored features with that id (or, with no id, that key): a feature made again with the key has a new id and is kept"
+      - if there are none, do nothing; otherwise write no features, removing removed
+  last_features: "the features this store last read from Redis (at attach or refresh) or wrote there: what a full set's missing features are judged against"
+  write:   # optimistic locking; given incoming features and the ids removed
     steps:
-      - "sha = SHA(to_write)"
       - "repeat up to retryUpdateCount times:"
-      - "  WATCH <sha key>; read current sha"
-      - "  if current == sha: UNWATCH; last_sha = sha; done"
-      - "  if current is set and != last_sha (another process wrote): read the stored features; if none of to_write is newer, UNWATCH and stop (ours are stale); else to_write = merge(to_write, stored), sha = SHA(to_write)"
+      - "  WATCH <sha key>; read current sha; if it is set, read the stored features"
+      - "  to_write = incoming if Redis holds nothing, else merge(incoming, stored, removed)"
+      - "  sha = SHA(to_write), computed by the store (featurehub-protocol.yaml encoding.sha)"
+      - "  if current == sha (nothing changes: ours are the same, or all older): UNWATCH; last_sha = sha; last_features = to_write; done"
       - "  MULTI; SET <sha key> sha; SET <features key> JSON(to_write); EXEC"
-      - "  if EXEC succeeded: last_sha = sha; done"
-      - "  else wait backoff and try again"
+      - "  if EXEC succeeded: last_sha = sha; last_features = to_write; done"
+      - "  else (another process wrote in between) wait backoff and try again"
       - "after the last attempt: log severe and give up"
-    merge: "by id, keeping the higher version; incoming wins only if strictly newer (a missing feature counts as version -1)"
-    known_limit: >-
-      As in the TypeScript SDK, a delete is skipped when another process has
-      written since this one last read (nothing in to_write is newer than
-      what is stored).
+    merge: "the stored features without the removed ids, then each incoming feature replacing an older copy (or added): by id, incoming wins only if strictly newer (a missing feature counts as version -1). A feature only in Redis, which another process wrote, is kept"
+    difference_from_typescript: >-
+      The TypeScript store writes a full set only when something in it is
+      newer, and skips a delete when another process has written since it
+      last read, so deleted features stay in Redis and a process that starts
+      later loads them. This store removes them.
 
 # ---------------------------------------------------------------------------
 # 6. YAML store and interceptor (local development)
@@ -319,7 +326,12 @@ yaml:
 # 7. Snapshot store (server SDKs)
 # ---------------------------------------------------------------------------
 snapshot_store:
-  platform: "server SDKs only (Dart: featurehub-openfeatures-server-sdk); never in the core SDK"
+  platform: >-
+    Server SDKs only. In an SDK with separate client and server packages
+    (Dart: featurehub-openfeatures-server-sdk) it is in the server package,
+    never the core SDK. An SDK with a single package (Go, Python, Ruby, .NET)
+    MAY build snapshots from its repository instead of with a store
+    (feature-snapshot-protocol.yaml placement.packaging.single).
   source: snapshot-store
   summary: >-
     Supplies no features: attach seeds a copy from the features the
@@ -340,6 +352,8 @@ conformance:
   - {id: local-storage-format, check: "the item key and JSON object format above; a delete removes the entry"}
   - {id: redis-sha-compatible, check: "the stored sha matches the SHA algorithm's test vectors and the TypeScript implementation"}
   - {id: redis-merge, check: "a write after another process wrote keeps the higher version of each feature"}
+  - {id: redis-removals, check: "a full set that leaves out a feature this process last saw removes it, though no version changed; one that leaves out a feature another process added since keeps it; a deletion removes the feature even if another process wrote first, and leaves a feature made again with the same key (a new id)"}
+  - {id: local-storage-per-context, check: "for a server-evaluated key, features stored for one context are not loaded by a start with another (it stays not ready), and after a context change features are stored for the new context"}
   - {id: redis-refuses, check: "no attach without an API key, or with a server-evaluated key"}
   - {id: yaml-ids, check: "yaml.store.id_vectors"}
   - {id: yaml-pairing, check: "the store and interceptor together: values from the file, edits picked up, FeatureHub's features replacing the store's"}
