@@ -39,6 +39,7 @@ spec:
     - version: 1.2.0
       changes:
         - "featurehub_edge.feature_updates: every SDK, client- and server-side, MUST provide a feature updater: PUT <host>/features/<apiKey>/<featureKey> with a FeatureStateUpdate (value, updateValue, lock), changing a feature's value or lock in an environment through Edge, as tests and test tools do. Its result is the outcome Edge answered (applied, unchanged, invalid, forbidden, not found, not possible, unavailable) and never an exception for an HTTP status"
+        - "featurehub_edge.streaming.not_an_event_stream: a 200 with no Content-Type is the stream (only one with another type is a failed connection)"
         - "todo-server-tests.yaml: the end-to-end suite (a todo server, an SDK's feature updater and its client) that every SDK can run, taken out of the JavaScript SDK's cucumber tests"
     - version: 1.1.2
       changes:
@@ -1223,7 +1224,9 @@ featurehub_edge:
         not as a stream that opened. Otherwise it looks like a stream that
         opens and ends at once, forever, with no backoff. It SHOULD use the
         network-error delay and count towards the maximum attempts, where the
-        reference behaviour has them (backoff).
+        reference behaviour has them (backoff). A 200 with no Content-Type
+        is taken as the stream: only one with another type is a failed
+        connection.
       not_an_event_stream_in_browsers: >-
         A browser's EventSource cannot meet not_an_event_stream: it refuses a
         response that is not text/event-stream itself, closing for good
@@ -1450,7 +1453,7 @@ conformance:
   - id: streaming-statuses
     check: "the default reconnect policy retries 1xx, 3xx and 5xx, and not any 4xx (429 included)"
   - id: streaming-not-an-event-stream
-    check: "a 200 with Content-Type text/html is a failed connection: notify(bye), and backed off, not a stream that opened"
+    check: "a 200 with Content-Type text/html is a failed connection: notify(bye), and backed off, not a stream that opened; a 200 with no Content-Type is the stream"
   - id: streaming-not-an-event-stream-delay
     check: "(SHOULD) a 200 with Content-Type text/html is retried with the network-error delay and counted towards the maximum attempts"
   - id: streaming-backoff
